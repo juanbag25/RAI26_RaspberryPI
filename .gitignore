@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.bin
+*.pt
+models/
+*.wav
+*.mp3
+.env
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
