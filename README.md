@@ -18,7 +18,7 @@ stt-project/
 │
 ├── linux/                # Raspberry Pi 5 implementation (to be done)
 │
-├── models/               # Optional: manually downloaded Whisper weights
+├── models/               # Whisper model files (downloaded manually, not in git)
 │
 ├── .gitignore
 └── README.md
@@ -45,7 +45,7 @@ stt-project/
 - Python 3.10 or higher (check with `python --version`)
 - USB microphone connected
 
-### Installation
+### 1. Install dependencies
 
 Open PowerShell in the project root:
 
@@ -62,13 +62,43 @@ python -m venv .venv
 pip install -r windows/requirements.txt
 ```
 
-### First run
+### 2. Download the Whisper model
+
+The model weights are **not** bundled in the repo — you download them manually once. By default the project uses the `base` model.
+
+1. Open https://huggingface.co/Systran/faster-whisper-base/tree/main in a browser.
+2. Create the folder `stt-project/models/faster-whisper-base/`.
+3. Download these four files into it (click each file → click the download icon):
+   - `config.json`
+   - `model.bin` (~140 MB)
+   - `tokenizer.json`
+   - `vocabulary.txt`
+
+The final layout should look like:
+
+```
+stt-project/
+└── models/
+    └── faster-whisper-base/
+        ├── config.json
+        ├── model.bin
+        ├── tokenizer.json
+        └── vocabulary.txt
+```
+
+To use a different model size, download the equivalent files from `Systran/faster-whisper-<size>` (e.g. `tiny`, `small`, `medium`, `large-v3`, `distil-large-v3`) into a sibling folder `models/faster-whisper-<size>/`, then edit `windows/config.py`:
+
+```python
+MODEL_SIZE = "small"   # picks models/faster-whisper-small/
+```
+
+Approximate sizes (int8): `tiny` ~40 MB, `base` ~140 MB, `small` ~470 MB, `medium` ~1.4 GB, `large-v3` ~3 GB.
+
+### 3. Run
 
 ```powershell
 python windows/main.py
 ```
-
-On first run, `faster-whisper` downloads the `base` model from HuggingFace (~140 MB) and caches it under `%USERPROFILE%\.cache\huggingface\hub\`. Subsequent runs load the cached model instantly and are fully offline.
 
 The program prints all available audio devices on startup. If your USB microphone is not the system default, note its ID from the list and edit `windows/main.py` to pass it explicitly:
 
@@ -95,29 +125,13 @@ Press **Ctrl+C** to stop.
 
 ### Tuning
 
-All knobs live in [windows/config.py](windows/config.py):
+Knobs in [windows/config.py](windows/config.py):
 
-- `MODEL_SIZE` — `"tiny"`, `"base"`, `"small"`, `"medium"`, `"large-v3"`, or a local folder path
+- `MODEL_SIZE` — which folder under `models/faster-whisper-<MODEL_SIZE>/` to load
 - `LANGUAGE` — language code (`"es"`, `"en"`, etc.)
 - `VAD_AGGRESSIVENESS` — webrtcvad strictness, 0 (lenient) to 3 (strict)
 - `SILENCE_MS` — sustained silence required to close an utterance
 - `PRE_SPEECH_PADDING_MS` — audio buffered before VAD triggers (avoids cutting initial phonemes)
-
-## Troubleshooting
-
-### HuggingFace download fails (`WinError 10054`, connection reset, etc.)
-
-Some networks (corporate firewalls, certain ISPs, VPNs, antivirus with TLS inspection) block the HuggingFace API endpoint. The model files can still be reached from a browser, so download them manually:
-
-1. Open https://huggingface.co/Systran/faster-whisper-base/tree/main in a browser.
-2. Create the folder `stt-project/models/faster-whisper-base/` and download these four files into it:
-   - `config.json`
-   - `model.bin` (~140 MB)
-   - `tokenizer.json`
-   - `vocabulary.txt`
-3. Run `python windows/main.py` again. `config.py` auto-detects the local folder and loads the model from disk instead of contacting HuggingFace.
-
-To use a different model size, repeat the steps from the matching `Systran/faster-whisper-<size>` repo and adjust the folder name (and `MODEL_SIZE` in `config.py` if needed).
 
 ## License
 
