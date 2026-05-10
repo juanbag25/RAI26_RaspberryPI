@@ -3,12 +3,12 @@ import sys
 import numpy as np
 from faster_whisper import WhisperModel
 
-from config import COMPUTE_TYPE, LANGUAGE, MODEL_SIZE
+from config import COMPUTE_TYPE, LANGUAGE, MODEL_PATH
 
 
 class Transcriber:
     def __init__(self) -> None:
-        self._model = WhisperModel(MODEL_SIZE, device="cpu", compute_type=COMPUTE_TYPE)
+        self._model = WhisperModel(MODEL_PATH, device="cpu", compute_type=COMPUTE_TYPE)
 
     def transcribe(self, audio_np: np.ndarray) -> str:
         try:
