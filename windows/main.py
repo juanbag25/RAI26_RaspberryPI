@@ -1,3 +1,7 @@
+from dotenv import load_dotenv
+
+load_dotenv()
+
 from audio_capture import WindowsAudioCapture
 from config import BACKEND
 from vad import VoiceActivityDetector
