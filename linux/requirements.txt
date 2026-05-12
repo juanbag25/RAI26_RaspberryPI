@@ -2,3 +2,5 @@ faster-whisper
 numpy<2.0
 sounddevice
 webrtcvad-wheels
+groq
+python-dotenv
