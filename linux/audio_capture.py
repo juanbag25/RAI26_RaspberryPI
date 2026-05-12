@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import os
 from typing import Iterator
+
+# USB mics rarely support 16 kHz natively; route ALSA through "plug" so
+# PortAudio gets transparent sample-rate conversion.
+os.environ.setdefault("PA_ALSA_PLUGHW", "1")
 
 import sounddevice as sd
 
