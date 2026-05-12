@@ -3,12 +3,25 @@ import os
 SAMPLE_RATE = 16000
 FRAME_MS = 30
 
-MODEL_SIZE = "base"
+# Backend STT: "local" (faster-whisper en CPU) o "groq" (Groq cloud API).
+BACKEND = "local"
+
+# --- Backend local (faster-whisper) ------------------------------------------
+# Opciones: "tiny", "base", "small", "medium", "large-v3"
+# Debe coincidir con una carpeta models/faster-whisper-<MODEL_SIZE>
+MODEL_SIZE = "small"
 COMPUTE_TYPE = "int8"
+
+# --- Backend groq ------------------------------------------------------------
+# Opciones: "whisper-large-v3", "whisper-large-v3-turbo"
+# La API key se lee de la variable de entorno GROQ_API_KEY.
+GROQ_MODEL = "whisper-large-v3-turbo"
+
+# --- Común -------------------------------------------------------------------
 LANGUAGE = "es"
 
 VAD_AGGRESSIVENESS = 2
-SILENCE_MS = 700
+SILENCE_MS = 200
 PRE_SPEECH_PADDING_MS = 200
 
 _HERE = os.path.dirname(os.path.abspath(__file__))

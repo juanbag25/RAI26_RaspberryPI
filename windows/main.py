@@ -1,6 +1,13 @@
 from audio_capture import WindowsAudioCapture
-from transcriber import Transcriber
+from config import BACKEND
 from vad import VoiceActivityDetector
+
+if BACKEND == "groq":
+    from groq_transcriber import GroqTranscriber as Transcriber
+elif BACKEND == "local":
+    from transcriber import Transcriber
+else:
+    raise ValueError(f"Unknown BACKEND: {BACKEND!r} (expected 'local' or 'groq')")
 
 
 def main() -> None:
@@ -8,7 +15,7 @@ def main() -> None:
     WindowsAudioCapture.list_devices()
     print()
 
-    print("Loading model...")
+    print(f"Loading transcriber (backend={BACKEND})...")
     transcriber = Transcriber()
     vad = VoiceActivityDetector()
     capture = WindowsAudioCapture()
