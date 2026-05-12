@@ -4,7 +4,7 @@ SAMPLE_RATE = 16000
 FRAME_MS = 30
 
 # Backend STT: "local" (faster-whisper en CPU) o "groq" (Groq cloud API).
-BACKEND = "local"
+BACKEND = "groq"
 
 # --- Backend local (faster-whisper) ------------------------------------------
 # Opciones: "tiny", "base", "small", "medium", "large-v3"
@@ -21,7 +21,7 @@ GROQ_MODEL = "whisper-large-v3-turbo"
 LANGUAGE = "es"
 
 VAD_AGGRESSIVENESS = 2
-SILENCE_MS = 200
+SILENCE_MS = 600
 PRE_SPEECH_PADDING_MS = 200
 
 _HERE = os.path.dirname(os.path.abspath(__file__))

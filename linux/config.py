@@ -3,7 +3,9 @@ import os
 SAMPLE_RATE = 16000
 FRAME_MS = 30
 
-MODEL_SIZE = "base"
+# Opciones: "tiny", "base", "small", "medium", "large-v3"
+# Debe coincidir con una carpeta models/faster-whisper-<MODEL_SIZE>
+MODEL_SIZE = "small"
 COMPUTE_TYPE = "int8"
 LANGUAGE = "es"
 
