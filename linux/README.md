@@ -34,7 +34,7 @@ rsync -avz --exclude '.venv' --exclude '__pycache__' --exclude 'models' \
   /path/to/stt-project/ pi@raspberrypi.local:~/stt-project/
 ```
 
-`scp -r` also works for a one-shot copy.
+`scp -r ./linux rai26@[ip]:~/stt-project/` also works for a one-shot copy.
 
 ## 2. System dependencies
 
