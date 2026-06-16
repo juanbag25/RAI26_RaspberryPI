@@ -1,7 +1,10 @@
 faster-whisper
 numpy<2.0
 sounddevice
+soundfile
 webrtcvad-wheels
 groq
 python-dotenv
-google-cloud-texttospeech
+edge-tts
+# TTS opcional (solo si TTS_ENGINE = "google_cloud"):
+# google-cloud-texttospeech

@@ -110,37 +110,30 @@ python linux/main.py
 
 Speak into the mic. The system prints transcribed utterances prefixed with `>>>`. Press **Ctrl+C** to stop.
 
-## TTS — respuesta hablada (Google Cloud Text-to-Speech)
+## TTS — respuesta hablada
 
 Además de transcribir, esta Pi ahora **recibe** la respuesta del orquestador y la
 **dice** por el parlante. Flujo:
 
 ```
-mic → STT → (TCP 9000) orquestador → LLM → (TCP 9001) Pi → Google TTS → parlante
+mic → STT → (TCP 9000) orquestador → LLM → (TCP 9001) Pi → TTS → parlante
 ```
 
-### Dependencias
+El motor de TTS se elige en `config.py` (`TTS_ENGINE`):
 
-`google-cloud-texttospeech` ya está en `requirements.txt`. Si actualizaste el
-repo, reinstalá:
+- **`edge`** (default) — edge-tts, voces neuronales de Microsoft Edge. **Gratis,
+  sin API key ni billing.** Necesita internet.
+- **`google_cloud`** — Google Cloud TTS (requiere credenciales + billing).
+
+### Dependencias
 
 ```bash
 source .venv/bin/activate
 pip install -r linux/requirements.txt
 ```
 
-### Credenciales de Google Cloud
-
-1. En Google Cloud, creá un proyecto, habilitá **Cloud Text-to-Speech API** y
-   creá una **service account** con una key JSON. Descargá el JSON.
-2. Apuntá la variable de entorno a ese archivo (en la misma shell donde corrés
-   `main.py` o `tts_test.py`):
-
-   ```bash
-   export GOOGLE_APPLICATION_CREDENTIALS=/ruta/al/key.json
-   ```
-
-   (Windows PowerShell: `$env:GOOGLE_APPLICATION_CREDENTIALS="C:\ruta\key.json"`.)
+(`edge-tts` + `soundfile` ya están en `requirements.txt`. `google-cloud-texttospeech`
+está comentado: descomentalo solo si vas a usar ese motor.)
 
 ### Configuración
 
@@ -148,14 +141,17 @@ En [`config.py`](config.py):
 
 - `RESPONSE_PORT` (default `9001`) — puerto donde la Pi escucha la respuesta del
   orquestador. Debe coincidir con `HRI_PORT` del orquestador.
-- `TTS_LANGUAGE`, `TTS_VOICE` — idioma/voz (ver
-  https://cloud.google.com/text-to-speech/docs/voices).
-- `TTS_SAMPLE_RATE`, `TTS_SPEAKING_RATE`, `TTS_OUTPUT_DEVICE`.
+- `TTS_ENGINE` — `edge` o `google_cloud`.
+- `EDGE_VOICE` — voz de edge-tts (ej. `es-AR-TomasNeural`, `es-AR-ElenaNeural`).
+  Listá todas con `edge-tts --list-voices | grep es-`.
+- `EDGE_RATE`, `EDGE_PITCH`, `TTS_OUTPUT_DEVICE`.
 
 En `linux/.env`, además de `GROQ_API_KEY`:
 
 ```bash
 ORCHESTRATOR_IP=<IP de la Jetson en la WiFi>
+# Solo si TTS_ENGINE=google_cloud:
+# GOOGLE_APPLICATION_CREDENTIALS=/ruta/absoluta/al/key.json
 ```
 
 (El puerto de salida está fijo en `main.py`: `ORCHESTRATOR_PORT = 9000`.)
@@ -163,14 +159,21 @@ ORCHESTRATOR_IP=<IP de la Jetson en la WiFi>
 ### Probar solo el TTS (sin pipeline)
 
 Para escuchar cómo habla con un texto de prueba, **sin** STT ni orquestador.
-Lo podés correr en tu compu y sale por el parlante de tu compu:
+Con `edge` no hace falta ninguna credencial. Lo podés correr en tu compu y sale
+por el parlante de tu compu:
 
 ```bash
 source .venv/bin/activate
-export GOOGLE_APPLICATION_CREDENTIALS=/ruta/al/key.json
 python linux/tts_test.py
 python linux/tts_test.py "Hola, soy el perro robot del ITBA"
 ```
+
+### (Opcional) usar Google Cloud TTS
+
+Poné `TTS_ENGINE = "google_cloud"` en `config.py`, descomentá
+`google-cloud-texttospeech` en `requirements.txt` y reinstalá. Necesitás un JSON
+de service account y apuntar `GOOGLE_APPLICATION_CREDENTIALS` (en `linux/.env`) a
+su ruta absoluta. Voces: https://cloud.google.com/text-to-speech/docs/voices
 
 Mapa completo de IPs/puertos del sistema: ver `docs/NETWORKING.md` en el repo
 principal (R-AI-026).
