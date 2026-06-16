@@ -6,7 +6,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from audio_capture import LinuxAudioCapture
-from config import BACKEND
+from config import BACKEND, RESPONSE_PORT
+from response_server import start_in_background
+from tts_player import TtsPlayer
 from vad import VoiceActivityDetector
 
 Target_IP = "192.168.68.60"
@@ -58,11 +60,21 @@ def main() -> None:
     vad = VoiceActivityDetector()
     capture = LinuxAudioCapture()
 
+    # TTS: arranca el servidor que recibe la respuesta del orquestador y la
+    # reproduce. `tts.speaking` queda en True mientras suena el audio, para
+    # silenciar el micrófono y no transcribir la propia voz del robot.
+    tts = TtsPlayer()
+    start_in_background(RESPONSE_PORT, tts.speak)
+    print(f"TTS response server on 0.0.0.0:{RESPONSE_PORT}")
+
     print(f"Listening. Sending outputs to {ORCHESTRATOR_IP}:{ORCHESTRATOR_PORT}")
     print("Press Ctrl+C to stop.")
-    
+
     try:
         for frame in capture.frames():
+            # Ignorar audio mientras el robot habla (evita el bucle de feedback).
+            if tts.speaking.is_set():
+                continue
             closed, audio = vad.process_frame(frame)
             if closed and audio is not None:
                 text = transcriber.transcribe(audio)
@@ -70,7 +82,7 @@ def main() -> None:
                     print(f">>> {text}")
                     # Enviar el texto si no está vacío
                     send_to_orchestrator(text, ORCHESTRATOR_IP, ORCHESTRATOR_PORT)
-                    
+
     except KeyboardInterrupt:
         print("\nStopped.")
 

@@ -4,3 +4,4 @@ sounddevice
 webrtcvad-wheels
 groq
 python-dotenv
+google-cloud-texttospeech
