@@ -1,16 +1,16 @@
 """Standalone TTS smoke test.
 
-Synthesizes a string with Google Cloud TTS and plays it on the local speaker.
-Use it to verify your Google credentials, voice config and audio output work,
-WITHOUT running the full STT / orchestrator pipeline.
+Synthesizes a string with the configured TTS engine (config.py TTS_ENGINE) and
+plays it on the local speaker. Use it to verify voice/audio output work WITHOUT
+running the full STT / orchestrator pipeline.
+
+Default engine is "edge" (edge-tts): free, no API key, no billing — just needs
+internet. (For "google_cloud" set GOOGLE_APPLICATION_CREDENTIALS in linux/.env.)
 
 Run it on any machine (your laptop is fine — it'll come out of your laptop's
 speaker):
 
-    # 1. set credentials (service-account JSON downloaded from GCP)
-    #    Linux/macOS:  export GOOGLE_APPLICATION_CREDENTIALS=/path/to/key.json
-    #    Windows PS:   $env:GOOGLE_APPLICATION_CREDENTIALS="C:\\path\\to\\key.json"
-    # 2. run it
+    pip install -r linux/requirements.txt
     python tts_test.py
     python tts_test.py "Hola, soy el perro robot del ITBA"
 """
@@ -18,6 +18,12 @@ speaker):
 from __future__ import annotations
 
 import sys
+
+from dotenv import load_dotenv
+
+# Levanta linux/.env (busca desde la ubicación de este script hacia arriba), así
+# GOOGLE_APPLICATION_CREDENTIALS puede vivir ahí en vez de exportarlo a mano.
+load_dotenv()
 
 from tts_player import TtsPlayer
 
@@ -32,7 +38,7 @@ def main() -> None:
     player.speak(text)
 
     print("Listo. Si no escuchaste nada, revisá el dispositivo de salida "
-          "(config.py TTS_OUTPUT_DEVICE) y las credenciales de Google.")
+          "(config.py TTS_OUTPUT_DEVICE) y, con edge, que haya internet.")
 
 
 if __name__ == "__main__":
