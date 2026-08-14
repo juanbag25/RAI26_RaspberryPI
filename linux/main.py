@@ -6,9 +6,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from audio_capture import LinuxAudioCapture
-from config import BACKEND, RESPONSE_PORT
-from response_server import start_in_background
-from tts_player import TtsPlayer
+from config import BACKEND, CTRL_PORT
+from ctrl_server import SpeakMute, start_in_background
 from vad import VoiceActivityDetector
 
 Target_IP = "192.168.68.60"
@@ -55,25 +54,29 @@ def main() -> None:
     LinuxAudioCapture.list_devices()
     print()
 
+    # Mic opcional por .env (AUDIO_INPUT_DEVICE = índice de sounddevice).
+    # Vacío = dispositivo default del sistema, igual que siempre en la Pi.
+    device_env = os.getenv("AUDIO_INPUT_DEVICE", "").strip()
+    audio_device = int(device_env) if device_env else None
+
     print(f"Loading transcriber (backend={BACKEND})...")
     transcriber = Transcriber()
     vad = VoiceActivityDetector()
-    capture = LinuxAudioCapture()
+    capture = LinuxAudioCapture(device_id=audio_device)
 
-    # TTS: arranca el servidor que recibe la respuesta del orquestador y la
-    # reproduce. `tts.speaking` queda en True mientras suena el audio, para
-    # silenciar el micrófono y no transcribir la propia voz del robot.
-    tts = TtsPlayer()
-    start_in_background(RESPONSE_PORT, tts.speak)
-    print(f"TTS response server on 0.0.0.0:{RESPONSE_PORT}")
+    # Mute remoto: el orquestador avisa SPEAK_START/SPEAK_END mientras habla
+    # y acá se descartan los frames, así el robot no se transcribe a sí mismo.
+    mute = SpeakMute()
+    start_in_background(CTRL_PORT, mute)
+    print(f"Speak-mute control server on 0.0.0.0:{CTRL_PORT}")
 
     print(f"Listening. Sending outputs to {ORCHESTRATOR_IP}:{ORCHESTRATOR_PORT}")
     print("Press Ctrl+C to stop.")
 
     try:
         for frame in capture.frames():
-            # Ignorar audio mientras el robot habla (evita el bucle de feedback).
-            if tts.speaking.is_set():
+            # El robot está hablando: ignorar audio (evita el autoescucha).
+            if mute.is_muted():
                 continue
             closed, audio = vad.process_frame(frame)
             if closed and audio is not None:

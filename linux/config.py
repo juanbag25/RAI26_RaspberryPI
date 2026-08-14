@@ -20,32 +20,13 @@ GROQ_MODEL = "whisper-large-v3-turbo"
 # --- Común -------------------------------------------------------------------
 LANGUAGE = "es"
 
-# --- TTS (respuesta hablada) -------------------------------------------------
-# Puerto donde esta Pi escucha el texto de respuesta que manda el orquestador.
-RESPONSE_PORT = 9001
-
-# Motor de TTS: "edge" (gratis, sin credenciales, necesita internet) o
-# "google_cloud" (requiere credenciales + billing).
-TTS_ENGINE = "edge"
-
-# Dispositivo de salida (índice de sounddevice). None = default del sistema.
-TTS_OUTPUT_DEVICE = None
-
-# --- edge-tts (TTS_ENGINE = "edge") ------------------------------------------
-# Voces en español: listalas con  `edge-tts --list-voices | grep es-`
-# Sugeridas (Argentina): "es-AR-TomasNeural" (masc), "es-AR-ElenaNeural" (fem).
-EDGE_VOICE = "es-AR-TomasNeural"
-# Formato de edge-tts para velocidad/tono (porcentaje / Hz, con signo):
-EDGE_RATE = "+0%"
-EDGE_PITCH = "+0Hz"
-
-# --- Google Cloud TTS (TTS_ENGINE = "google_cloud") --------------------------
-# Credenciales: variable GOOGLE_APPLICATION_CREDENTIALS (ruta al JSON).
-# Voces: https://cloud.google.com/text-to-speech/docs/voices
-TTS_LANGUAGE = "es-US"
-TTS_VOICE = "es-US-Neural2-B"   # "" = voz default del idioma
-TTS_SAMPLE_RATE = 24000
-TTS_SPEAKING_RATE = 1.0
+# --- Control de mute (aviso del orquestador) ----------------------------------
+# Puerto donde este script escucha SPEAK_START / SPEAK_END del orquestador
+# (= MIC_CTRL_PORT del orchestrator). Mientras el robot habla, el mic se
+# silencia para no transcribirse a sí mismo.
+CTRL_PORT = 9001
+# Auto-desmute si se pierde el SPEAK_END (segundos).
+MUTE_TIMEOUT_S = 30.0
 
 VAD_AGGRESSIVENESS = 3
 SILENCE_MS = 700
