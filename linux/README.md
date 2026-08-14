@@ -79,13 +79,17 @@ MODEL_SIZE = "small"
 
 ## 5. Configure the `.env`
 
-Create `linux/.env` (it's already gitignored):
+Create `linux/.env` (it's already gitignored; see `linux/.env.example`):
 
 ```bash
-echo "GROQ_API_KEY=gsk_your_key_here" > linux/.env
+cat > linux/.env <<'EOF'
+ORCHESTRATOR_IP=<IP de la máquina del orquestador>
+GROQ_API_KEY=gsk_your_key_here
+AUDIO_INPUT_DEVICE=
+EOF
 ```
 
-Only required when `BACKEND = "groq"`.
+`GROQ_API_KEY` is only required when `BACKEND = "groq"`.
 
 ## 6. Find the microphone
 
@@ -93,10 +97,11 @@ Only required when `BACKEND = "groq"`.
 python -m sounddevice
 ```
 
-Note the input device ID of your USB mic. If it's not the system default, edit `linux/main.py`:
+Note the input device ID of your USB mic. If it's not the system default, set
+it in `linux/.env`:
 
-```python
-capture = LinuxAudioCapture(device_id=N)
+```bash
+AUDIO_INPUT_DEVICE=N
 ```
 
 You can also double-check with `arecord -l`.
@@ -110,70 +115,23 @@ python linux/main.py
 
 Speak into the mic. The system prints transcribed utterances prefixed with `>>>`. Press **Ctrl+C** to stop.
 
-## TTS — respuesta hablada
+## Respuesta hablada
 
-Además de transcribir, esta Pi ahora **recibe** la respuesta del orquestador y la
-**dice** por el parlante. Flujo:
+La respuesta del LLM ya **no** vuelve a esta Pi: la sintetiza y la dice el
+orquestador (`R-AI-026/orchestrator`) por los parlantes de la máquina donde
+corre (la Jetson en el robot). Esta Pi solo captura audio, transcribe y manda
+el texto:
 
 ```
-mic → STT → (TCP 9000) orquestador → LLM → (TCP 9001) Pi → TTS → parlante
+mic → STT → (TCP 9000) orquestador → LLM → TTS → parlante del orquestador
+ ▲                                          │
+ └──────── SPEAK_START/END (TCP 9001) ──────┘   mute del mic mientras habla
 ```
 
-El motor de TTS se elige en `config.py` (`TTS_ENGINE`):
-
-- **`edge`** (default) — edge-tts, voces neuronales de Microsoft Edge. **Gratis,
-  sin API key ni billing.** Necesita internet.
-- **`google_cloud`** — Google Cloud TTS (requiere credenciales + billing).
-
-### Dependencias
-
-```bash
-source .venv/bin/activate
-pip install -r linux/requirements.txt
-```
-
-(`edge-tts` + `soundfile` ya están en `requirements.txt`. `google-cloud-texttospeech`
-está comentado: descomentalo solo si vas a usar ese motor.)
-
-### Configuración
-
-En [`config.py`](config.py):
-
-- `RESPONSE_PORT` (default `9001`) — puerto donde la Pi escucha la respuesta del
-  orquestador. Debe coincidir con `HRI_PORT` del orquestador.
-- `TTS_ENGINE` — `edge` o `google_cloud`.
-- `EDGE_VOICE` — voz de edge-tts (ej. `es-AR-TomasNeural`, `es-AR-ElenaNeural`).
-  Listá todas con `edge-tts --list-voices | grep es-`.
-- `EDGE_RATE`, `EDGE_PITCH`, `TTS_OUTPUT_DEVICE`.
-
-En `linux/.env`, además de `GROQ_API_KEY`:
-
-```bash
-ORCHESTRATOR_IP=<IP de la Jetson en la WiFi>
-# Solo si TTS_ENGINE=google_cloud:
-# GOOGLE_APPLICATION_CREDENTIALS=/ruta/absoluta/al/key.json
-```
-
-(El puerto de salida está fijo en `main.py`: `ORCHESTRATOR_PORT = 9000`.)
-
-### Probar solo el TTS (sin pipeline)
-
-Para escuchar cómo habla con un texto de prueba, **sin** STT ni orquestador.
-Con `edge` no hace falta ninguna credencial. Lo podés correr en tu compu y sale
-por el parlante de tu compu:
-
-```bash
-source .venv/bin/activate
-python linux/tts_test.py
-python linux/tts_test.py "Hola, soy el perro robot del ITBA"
-```
-
-### (Opcional) usar Google Cloud TTS
-
-Poné `TTS_ENGINE = "google_cloud"` en `config.py`, descomentá
-`google-cloud-texttospeech` en `requirements.txt` y reinstalá. Necesitás un JSON
-de service account y apuntar `GOOGLE_APPLICATION_CREDENTIALS` (en `linux/.env`) a
-su ruta absoluta. Voces: https://cloud.google.com/text-to-speech/docs/voices
+Mientras el robot habla, el orquestador manda `SPEAK_START`/`SPEAK_END` al
+puerto `CTRL_PORT` (default 9001, en `config.py`) y `main.py` descarta el
+audio del mic para no transcribir la propia voz del robot. Si el `SPEAK_END`
+se pierde, el mute expira solo a los `MUTE_TIMEOUT_S` segundos.
 
 Mapa completo de IPs/puertos del sistema: ver `docs/NETWORKING.md` en el repo
 principal (R-AI-026).
