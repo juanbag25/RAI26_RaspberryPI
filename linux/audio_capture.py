@@ -31,7 +31,13 @@ class LinuxAudioCapture:
         ) as stream:
             try:
                 while True:
-                    data, _ = stream.read(self._blocksize)
+                    data, overflowed = stream.read(self._blocksize)
+                    if overflowed:
+                        # El ring buffer de PortAudio no se drenó a tiempo
+                        # (algo bloqueó este loop demasiado); frames de audio
+                        # se perdieron/pisaron, lo que puede desincronizar al
+                        # VAD del tiempo real.
+                        print("[AUDIO WARN] input overflow: se perdieron frames de mic", flush=True)
                     yield bytes(data)
             except KeyboardInterrupt:
                 return
