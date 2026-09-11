@@ -230,10 +230,79 @@ All knobs live in [`linux/config.py`](config.py): `BACKEND`, `MODEL_SIZE`,
 `NOISE_FLOOR_*`) y los del wake word (`WAKE_*`). Los más usados se pueden pisar
 desde `linux/.env` — ver `.env.example`. Para el resto, ver el root README.
 
+## Logs y diagnóstico
+
+Todas las líneas salen con timestamp (`[HH:MM:SS.mmm]`) y sin buffer, así que
+sirven igual por SSH, `tmux` o redirigidas a un archivo. Cada etapa del
+pipeline deja rastro:
+
+```
+[AUDIO] stream abierto (latencia=32 ms)
+[AUDIO] primer frame recibido del mic: el stream funciona
+[VAD] utterance ABIERTA (rms=0.0812 >= umbral=0.0200, ruido=0.0041)
+[VAD] utterance CERRADA y aceptada: 1230 ms de voz, 2130 ms totales, nivel=0.0790 -> a transcribir
+[MAIN] utterance encolada para STT (cola=1)
+[STT] transcribiendo 2.1s de audio...
+[STT] 0.84s >>> Rai, vení para acá
+[WAKE] despierto por «Rai, vení para acá»
+[NET] enviado al orquestador 192.168.1.50:9000 (13 B en 0.01s): «vení para acá»
+```
+
+Además, cada `LOG_HEARTBEAT_S` segundos (default 10) sale un resumen `[HB]`:
+
+```
+[HB] frames=333 muteados=0 voz=41 voz>umbral=38 | rms max=0.0912 media=0.0060 ruido=0.0044 umbral_abrir=0.0200 cerca=0.055 | utt abiertas=1 ok=1 desc=0 en_utt=no | cola_stt=0 stt=1 vacías=0 enviadas=1 fallidas=0 | mute=no wake=despierto
+```
+
+Cómo leerlo cuando "se queda escuchando y no pasa nada":
+
+| Síntoma en `[HB]` | Significa | Qué tocar |
+|---|---|---|
+| `frames=0` / `<-- SIN AUDIO DEL MIC` | PortAudio no entrega audio | mic equivocado (`AUDIO_INPUT_DEVICE`), cable, `arecord -l` |
+| `rms max` ≈ 0.000x aunque hables | el mic está pero casi mudo | subir ganancia (`alsamixer`), otro device |
+| `voz=0` aunque hables | webrtcvad no ve voz | mic/sample rate raro; probar `VAD_AGGRESSIVENESS` más bajo |
+| `voz>0` pero `voz>umbral=0` | la voz llega floja | bajar `RMS_THRESHOLD` / subir ganancia; `LOG_DEBUG=1` muestra cada frame |
+| `abiertas>0` pero `ok=0` | se abren y se descartan | mirar los `[VAD] descartada:` (corta → `MIN_UTTERANCE_MS`; lejana → `NEAR_RMS_THRESHOLD`) |
+| `ok>0` pero `stt` no crece | el hilo de STT está trabado | mirar `[STT ERROR]` (Groq / API key / red) |
+| `vacías` crece | Groq devuelve "" | `[STT ERROR]` arriba, o audio inaudible |
+| `[WAKE] dormido, ignorado` | transcribió pero no dijiste "rai" | `WAKE_WORD_ENABLED=false` para probar |
+| `fallidas` crece | no llega al orquestador | `[NET ERROR]`: IP/puerto/firewall |
+| `mute=SÍ` todo el tiempo | se perdió un `SPEAK_END` | expira solo a los `MUTE_TIMEOUT_S`; revisar el orquestador |
+
+## Batería / alimentación
+
+Al arrancar (y cada `BATTERY_LOG_S` segundos, default 300) `main.py` loguea
+la alimentación ([`battery.py`](battery.py)); también se puede correr suelto
+con `python linux/battery.py`:
+
+```
+[POWER] UPS detectado: MAX17048 fuel gauge (Geekworm X120x?) en I2C 0x36
+[POWER] MAX17048 fuel gauge (Geekworm X120x?): batería 87%  4.02 V  descargando (-6.2 %/h)
+[POWER] Pi: entrada 5V real: 5.08 V
+[POWER] Pi: throttled=0x0  (ok)
+[POWER] Pi: fuente negociada: 5000 mA
+```
+
+- **UPS por I2C** — autodetecta los chips de los UPS más comunes: MAX17048
+  (Geekworm X1200/X1201/X1202/X1203, `0x36`), INA219 (Waveshare UPS HAT B/C,
+  `0x40`–`0x45`) y PiSugar 3 (`0x57`). Requiere `pip install smbus2` (ya está
+  en `requirements.txt`) y el I2C habilitado: `sudo raspi-config` → Interface
+  Options → I2C. Si el tuyo no aparece, `sudo apt install i2c-tools &&
+  i2cdetect -y 1` muestra qué dirección responde; se puede forzar con
+  `UPS_I2C_ADDR=0x..` en `.env` o agregar el chip en `battery.py`.
+- **La Pi misma** (`vcgencmd`, Pi 5) — tensión real de entrada (`EXT5V_V`:
+  si baja de 4.8 V la Pi avisa y es probable que se reinicie o suelte el USB
+  del mic), flags de undervoltage/throttling, y la corriente negociada por
+  USB-PD (5000 mA = fuente oficial; 3000 mA = fuente genérica, los USB quedan
+  limitados a 600 mA en total, lo que puede afectar al mic USB).
+
 ## Troubleshooting
 
 - **`paInvalidSampleRate` when opening the stream** — the code already sets `PA_ALSA_PLUGHW=1` in `audio_capture.py` so PortAudio routes through ALSA's `plug` plugin and gets transparent sample-rate conversion. If you still see this, confirm the mic appears in `arecord -l` and that `libasound2-dev` is installed.
 - **Mic not detected** — run `arecord -l`. If empty, check the USB cable and that your user is in the `audio` group (`groups | grep audio`).
+- **Escucha pero nunca transcribe nada** — mirá la línea `[HB]` y la tabla de
+  la sección *Logs y diagnóstico*: dice en qué etapa se queda (mic, VAD,
+  umbral, STT, wake word o red).
 - **`GROQ_API_KEY` not found** — make sure `linux/.env` exists and you ran the script from a shell where the venv is activated; `python-dotenv` loads it at import time in `main.py`.
 - **Model fails to load (local backend)** — verify `models/faster-whisper-<MODEL_SIZE>/` contains all four files (`config.json`, `model.bin`, `tokenizer.json`, `vocabulary.txt`) and that `MODEL_SIZE` in `config.py` matches the folder name.
 - **El robot no me escucha a mí** — mirá el log: si aparece `[VAD] descartada:

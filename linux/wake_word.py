@@ -23,6 +23,7 @@ import threading
 import time
 import unicodedata
 
+from log import log
 from config import (
     WAKE_ACK_TEXT,
     WAKE_SEARCH_WORDS,
@@ -118,8 +119,9 @@ class WakeWord:
         if index is None:
             if self.is_awake():
                 self._wake()  # sigue la conversación: renueva la ventana
+                log(f"[WAKE] ya despierto, sigue la charla (ventana +{WAKE_WINDOW_S:.0f}s)")
                 return text
-            print(f"[WAKE] dormido, ignorado: {text}", flush=True)
+            log(f"[WAKE] dormido, ignorado: {text}")
             return None
 
         self._wake()
@@ -127,7 +129,7 @@ class WakeWord:
         # al LLM le llega la instrucción sola.
         rest = " ".join(text.split()[owners[index] + 1:]).lstrip(" ,.;:-—").strip()
         if not rest:
-            print(f"[WAKE] despierto por «{text}» (sin instrucción)", flush=True)
+            log(f"[WAKE] despierto por «{text}» (sin instrucción, mando ack={WAKE_ACK_TEXT!r})")
             return WAKE_ACK_TEXT or None
-        print(f"[WAKE] despierto por «{text}»", flush=True)
+        log(f"[WAKE] despierto por «{text}»")
         return rest

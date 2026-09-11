@@ -1,16 +1,23 @@
 import io
-import sys
 import wave
 
 import numpy as np
 from groq import Groq
 
 from config import GROQ_MODEL, LANGUAGE, SAMPLE_RATE, STT_PROMPT
+from log import log
 
 
 class GroqTranscriber:
     def __init__(self) -> None:
+        # Groq() lee GROQ_API_KEY del entorno; si falta, explota recién en la
+        # primera transcripción con un error poco claro. Avisar ya.
+        import os
+        if not os.getenv("GROQ_API_KEY"):
+            log("[STT] AVISO: GROQ_API_KEY no está definida (¿falta linux/.env?): "
+                "toda transcripción va a fallar", err=True)
         self._client = Groq()
+        log(f"[STT] backend groq, modelo={GROQ_MODEL}, idioma={LANGUAGE}")
 
     def transcribe(self, audio_np: np.ndarray) -> str:
         try:
@@ -34,5 +41,5 @@ class GroqTranscriber:
             )
             return result.text.strip()
         except Exception as exc:
-            print(f"Groq transcription error: {exc}", file=sys.stderr)
+            log(f"[STT ERROR] Groq falló ({type(exc).__name__}): {exc}", err=True)
             return ""

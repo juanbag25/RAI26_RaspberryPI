@@ -4,3 +4,5 @@ sounddevice
 webrtcvad-wheels
 groq
 python-dotenv
+# lectura de batería del UPS por I2C (battery.py); opcional en la PC
+smbus2
