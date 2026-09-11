@@ -64,7 +64,7 @@ SILENCE_MS = 700
 PRE_SPEECH_PADDING_MS = 200
 # Duración mínima de voz real dentro de una utterance para enviarla a Whisper.
 # Descarta falsos positivos cortos que suelen alucinar "gracias", etc.
-MIN_UTTERANCE_MS = 400
+MIN_UTTERANCE_MS = int(_env_float("MIN_UTTERANCE_MS", 400))
 
 # --- Foco del micrófono: rechazo de campo lejano -------------------------------
 # El mic es omnidireccional: sin filtro, una charla del otro lado de la sala
@@ -86,12 +86,12 @@ NEAR_RMS_THRESHOLD = _env_float("NEAR_RMS_THRESHOLD", 0.055)
 NEAR_SNR_RATIO = _env_float("NEAR_SNR_RATIO", 3.0)
 # Frames de voz fuerte CONSECUTIVOS para abrir una utterance (30 ms c/u): evita
 # que un golpe o una sílaba lejana abran la ventana.
-ONSET_SPEECH_FRAMES = 3
+ONSET_SPEECH_FRAMES = int(_env_float("ONSET_SPEECH_FRAMES", 3))
 # Piso de ruido: EMA por frame descartado. Sube rápido, baja lento y está
 # topeado para que un ruido fuerte no deje al robot sordo.
 NOISE_FLOOR_INIT = 0.005
 NOISE_FLOOR_ALPHA = 0.05
-NOISE_FLOOR_MAX = 0.02
+NOISE_FLOOR_MAX = _env_float("NOISE_FLOOR_MAX", 0.02)
 
 # --- Wake word ----------------------------------------------------------------
 # Con esto activado el robot ignora TODO lo que se transcribe hasta que alguien
@@ -107,7 +107,7 @@ WAKE_WORDS = (
 )
 # Sólo se busca el nombre en las primeras N palabras de la frase: "rai vení" sí,
 # "el otro día en la clase de rai..." no.
-WAKE_SEARCH_WORDS = 3
+WAKE_SEARCH_WORDS = int(_env_float("WAKE_SEARCH_WORDS", 3))
 # Ventana de conversación en segundos: tras despertarlo, cuánto tiempo se le
 # puede seguir hablando sin volver a decir "rai". Cada frase aceptada —y cada
 # respuesta hablada del robot— la renueva.
