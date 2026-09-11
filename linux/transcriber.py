@@ -3,7 +3,7 @@ import sys
 import numpy as np
 from faster_whisper import WhisperModel
 
-from config import COMPUTE_TYPE, LANGUAGE, MODEL_PATH
+from config import COMPUTE_TYPE, LANGUAGE, MODEL_PATH, STT_PROMPT
 
 
 class Transcriber:
@@ -16,6 +16,8 @@ class Transcriber:
                 audio_np,
                 language=LANGUAGE,
                 beam_size=1,
+                # Misma pista de vocabulario que el backend groq: "RAI".
+                initial_prompt=STT_PROMPT,
             )
             return "".join(segment.text for segment in segments).strip()
         except Exception as exc:

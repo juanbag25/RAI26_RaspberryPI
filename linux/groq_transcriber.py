@@ -5,7 +5,7 @@ import wave
 import numpy as np
 from groq import Groq
 
-from config import GROQ_MODEL, LANGUAGE, SAMPLE_RATE
+from config import GROQ_MODEL, LANGUAGE, SAMPLE_RATE, STT_PROMPT
 
 
 class GroqTranscriber:
@@ -27,6 +27,10 @@ class GroqTranscriber:
                 file=("audio.wav", buf.read()),
                 model=GROQ_MODEL,
                 language=LANGUAGE,
+                # Sesga a Whisper hacia el dominio: escribe "RAI" (clave para
+                # el wake word) y alucina menos con audio flojo.
+                prompt=STT_PROMPT,
+                temperature=0.0,
             )
             return result.text.strip()
         except Exception as exc:

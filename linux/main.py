@@ -8,9 +8,17 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from audio_capture import LinuxAudioCapture
-from config import BACKEND, CTRL_PORT
+from config import (
+    BACKEND,
+    CTRL_PORT,
+    NEAR_RMS_THRESHOLD,
+    STT_PROMPT,
+    WAKE_WINDOW_S,
+    WAKE_WORD_ENABLED,
+)
 from ctrl_server import SpeakMute, start_in_background
 from vad import VoiceActivityDetector
+from wake_word import WakeWord, normalize
 
 if BACKEND == "groq":
     from groq_transcriber import GroqTranscriber as Transcriber
@@ -26,6 +34,20 @@ Target_IP = "192.168.68.60"
 # rechaza ni acepta (IP vieja, firewall, WSL que cambio de IP al reiniciar
 # el orquestador). Eso colgaba el hilo que lo llama indefinidamente.
 ORCHESTRATOR_CONNECT_TIMEOUT_S = 3.0
+
+_NORMALIZED_PROMPT = normalize(STT_PROMPT)
+
+
+def is_prompt_echo(text: str) -> bool:
+    """Whisper devolvió (parte de) STT_PROMPT en vez de transcribir.
+
+    Pasa con audio flojo o ruido: el modelo se agarra del prompt y lo repite.
+    Sin este chequeo, ese eco despertaría al robot solo. Se piden >=4 palabras
+    para no descartar frases cortas legítimas ("rai", "hola") que casualmente
+    aparecen en el prompt.
+    """
+    normalized = normalize(text)
+    return len(normalized.split()) >= 4 and normalized in _NORMALIZED_PROMPT
 
 
 # --- NUEVA FUNCIÓN DE RED ---
@@ -61,6 +83,7 @@ def send_to_orchestrator(text: str, ip: str, port: int) -> None:
 def transcribe_worker(
     audio_queue: "queue.Queue",
     transcriber,
+    wake: WakeWord,
     orchestrator_ip: str,
     orchestrator_port: int,
 ) -> None:
@@ -77,9 +100,16 @@ def transcribe_worker(
         if audio is None:  # señal de shutdown
             return
         text = transcriber.transcribe(audio)
-        if text:
-            print(f">>> {text}")
-            send_to_orchestrator(text, orchestrator_ip, orchestrator_port)
+        if not text:
+            continue
+        print(f">>> {text}")
+        if is_prompt_echo(text):
+            print("[STT] eco del prompt (ruido), descartado", flush=True)
+            continue
+        # Wake word: hasta que lo llamen por su nombre, no sale nada de acá.
+        payload = wake.filter(text)
+        if payload:
+            send_to_orchestrator(payload, orchestrator_ip, orchestrator_port)
 
 
 def main() -> None:
@@ -101,12 +131,22 @@ def main() -> None:
     transcriber = Transcriber()
     vad = VoiceActivityDetector()
     capture = LinuxAudioCapture(device_id=audio_device)
+    wake = WakeWord()
 
     # Mute remoto: el orquestador avisa SPEAK_START/SPEAK_END mientras habla
     # y acá se descartan los frames, así el robot no se transcribe a sí mismo.
-    mute = SpeakMute()
+    # El SPEAK_END además renueva la ventana del wake word: el robot acaba de
+    # contestar, lo natural es que le sigan hablando sin repetir el nombre.
+    mute = SpeakMute(on_speak_end=wake.refresh)
     start_in_background(CTRL_PORT, mute)
     print(f"Speak-mute control server on 0.0.0.0:{CTRL_PORT}")
+    if WAKE_WORD_ENABLED:
+        print(f"Wake word activo: decile «rai» para que escuche "
+              f"(ventana de {WAKE_WINDOW_S:.0f}s por turno)")
+    else:
+        print("Wake word DESACTIVADO (WAKE_WORD_ENABLED=False en config.py)")
+    print(f"Foco del mic: umbral de cercanía NEAR_RMS_THRESHOLD="
+          f"{NEAR_RMS_THRESHOLD} (calibrar con mic_level.py)")
 
     # STT + envío al orquestador corren en un hilo aparte (ver
     # transcribe_worker): son las dos operaciones lentas/bloqueantes del
@@ -114,7 +154,7 @@ def main() -> None:
     audio_queue: "queue.Queue" = queue.Queue()
     worker = threading.Thread(
         target=transcribe_worker,
-        args=(audio_queue, transcriber, ORCHESTRATOR_IP, ORCHESTRATOR_PORT),
+        args=(audio_queue, transcriber, wake, ORCHESTRATOR_IP, ORCHESTRATOR_PORT),
         daemon=True,
     )
     worker.start()

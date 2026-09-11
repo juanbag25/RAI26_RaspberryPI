@@ -17,6 +17,7 @@ import socket
 import struct
 import threading
 import time
+from typing import Callable
 
 from config import MUTE_TIMEOUT_S
 
@@ -24,8 +25,12 @@ _MAX_MESSAGE_BYTES = 1024
 
 
 class SpeakMute:
-    def __init__(self, timeout_s: float = MUTE_TIMEOUT_S) -> None:
+    def __init__(self, timeout_s: float = MUTE_TIMEOUT_S,
+                 on_speak_end: Callable[[], None] | None = None) -> None:
         self._timeout = timeout_s
+        # Se llama cuando el robot termina de hablar (o expira el mute): lo usa
+        # el wake word para renovar la ventana de conversación.
+        self._on_speak_end = on_speak_end
         self._muted = threading.Event()
         self._deadline = 0.0
 
@@ -35,8 +40,17 @@ class SpeakMute:
         if time.monotonic() > self._deadline:
             self._muted.clear()
             print("[CTRL] SPEAK_END perdido: desmuteo por timeout")
+            self._notify_speak_end()
             return False
         return True
+
+    def _notify_speak_end(self) -> None:
+        if self._on_speak_end is None:
+            return
+        try:
+            self._on_speak_end()
+        except Exception as exc:  # noqa: BLE001 - nunca matar el loop de mic
+            print(f"[CTRL ERROR] on_speak_end: {exc}")
 
     def handle(self, message: str) -> None:
         if message == "SPEAK_START":
@@ -46,6 +60,7 @@ class SpeakMute:
         elif message == "SPEAK_END":
             self._muted.clear()
             print("[CTRL] robot terminó: mic activo")
+            self._notify_speak_end()
         else:
             print(f"[CTRL] mensaje desconocido: {message!r}")
 
