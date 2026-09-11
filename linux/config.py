@@ -116,6 +116,15 @@ WAKE_WINDOW_S = _env_float("WAKE_WINDOW_S", 25.0)
 # conteste algo y se note que está escuchando. "" = no mandar nada (sólo abre
 # la ventana en silencio).
 WAKE_ACK_TEXT = "rai"
+# Atención: al despertarse, el robot se queda con el NIVEL de la voz que lo
+# llamó y, mientras dure la ventana, sólo acepta frases que lleguen al menos a
+# ese nivel × ATTENTION_LEVEL_RATIO. Quien está más lejos que quien dijo "rai"
+# (el fondo de la sala) queda afuera aunque pase el filtro de cercanía general.
+# 1.0 = tan fuerte como el "rai"; 0.5 = la mitad. 0 = desactivado.
+ATTENTION_LEVEL_RATIO = _env_float("ATTENTION_LEVEL_RATIO", 0.6)
+# El nivel de referencia sigue a la persona (EMA por frase aceptada): si se
+# acerca o aleja un poco, la referencia se mueve con ella.
+ATTENTION_FOLLOW_ALPHA = 0.3
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(_HERE, "..", "models", f"faster-whisper-{MODEL_SIZE}")

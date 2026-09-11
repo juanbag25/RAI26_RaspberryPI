@@ -116,6 +116,7 @@ class Counters:
         self.sent = 0           # mensajes que llegaron al orquestador
         self.send_failed = 0
         self.muted_frames = 0   # frames descartados por SPEAK_START
+        self.unfocused = 0      # utterances más flojas que quien nos llamó
 
 
 def transcribe_worker(
@@ -135,9 +136,10 @@ def transcribe_worker(
     se atrasaba/perdía contenido, sumando desfase a las respuestas del robot.
     """
     while True:
-        audio = audio_queue.get()
-        if audio is None:  # señal de shutdown
+        item = audio_queue.get()
+        if item is None:  # señal de shutdown
             return
+        audio, level = item
         seconds = len(audio) / 16000.0
         pending = audio_queue.qsize()
         log(f"[STT] transcribiendo {seconds:.1f}s de audio"
@@ -156,7 +158,7 @@ def transcribe_worker(
             log("[STT] eco del prompt (ruido), descartado")
             continue
         # Wake word: hasta que lo llamen por su nombre, no sale nada de acá.
-        payload = wake.filter(text)
+        payload = wake.filter(text, level)
         if payload:
             if send_to_orchestrator(payload, orchestrator_ip, orchestrator_port):
                 counters.sent += 1
@@ -206,7 +208,9 @@ def heartbeat_worker(
             f"fallidas={counters.send_failed} | "
             f"mute={'SÍ' if mute.is_muted() else 'no'} "
             f"wake={'despierto' if wake.is_awake() else 'dormido'}"
-            f"{audio_note}"
+            + (f" foco={wake.focus_level():.4f} mínimo={wake.min_level():.4f} "
+               f"ignoradas_por_foco={counters.unfocused}" if wake.is_awake() else "")
+            + f"{audio_note}"
         )
         if BATTERY_LOG_S > 0 and time.monotonic() - last_battery >= BATTERY_LOG_S:
             last_battery = time.monotonic()
@@ -284,18 +288,33 @@ def main() -> None:
 
     try:
         first_frame = True
+        was_muted = False
         for frame in capture.frames():
             if first_frame:
                 first_frame = False
                 log("[AUDIO] primer frame recibido del mic: el stream funciona")
             # El robot está hablando: ignorar audio (evita el autoescucha).
             if mute.is_muted():
+                if not was_muted:
+                    was_muted = True
+                    # Lo que quedó a medio decir cuando el robot arrancó a
+                    # hablar es viejo: no dejar que se cierre (y se envíe)
+                    # recién al desmutear.
+                    vad.discard_open_utterance()
                 counters.muted_frames += 1
                 continue
+            was_muted = False
             closed, audio = vad.process_frame(frame)
             if closed and audio is not None:
-                audio_queue.put(audio)
-                log(f"[MAIN] utterance encolada para STT (cola={audio_queue.qsize()})")
+                # Atención: despierto, sólo transcribimos lo que suena tan
+                # fuerte como quien dijo "rai" (el fondo no gasta Whisper).
+                level = vad.last_level
+                if not wake.accepts_level(level):
+                    counters.unfocused += 1
+                    continue
+                audio_queue.put((audio, level))
+                log(f"[MAIN] utterance encolada para STT (nivel={level:.4f}, "
+                    f"cola={audio_queue.qsize()})")
 
     except KeyboardInterrupt:
         log("Stopped.")

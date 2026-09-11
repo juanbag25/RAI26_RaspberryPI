@@ -74,6 +74,9 @@ class VoiceActivityDetector:
         self._silence_frames_to_close = max(1, SILENCE_MS // FRAME_MS)
         self._min_speech_frames = max(1, MIN_UTTERANCE_MS // FRAME_MS)
         self._noise_floor = NOISE_FLOOR_INIT
+        # Nivel (p90) de la última utterance aceptada: main.py lo lee justo
+        # después de process_frame() para la atención del wake word.
+        self.last_level = 0.0
         self._stats = VadStats()
         self._reset_utterance()
         log(f"[VAD] init: aggressiveness={VAD_AGGRESSIVENESS} frame={FRAME_MS}ms "
@@ -89,6 +92,24 @@ class VoiceActivityDetector:
     @property
     def in_speech(self) -> bool:
         return self._in_speech
+
+    def discard_open_utterance(self) -> bool:
+        """Tira la utterance en curso (si hay) sin transcribirla.
+
+        Lo llama main.py al entrar en mute: si el robot empezó a hablar con
+        una utterance abierta, los frames se saltean mientras suena y el VAD
+        queda congelado a mitad de frase. Al desmutear vería silencio, la
+        cerraría y mandaría a transcribir audio de ANTES de que el robot
+        hablara — una frase vieja que el orquestador contestaría como si fuera
+        nueva. Devuelve True si había algo abierto.
+        """
+        if not self._in_speech:
+            return False
+        log(f"[VAD] utterance descartada: el robot empezó a hablar "
+            f"({self._speech_frame_count * FRAME_MS} ms de voz se pierden)")
+        self._stats.rejected += 1
+        self._reset_utterance()
+        return True
 
     def _reset_utterance(self) -> None:
         self._in_speech = False
@@ -160,6 +181,7 @@ class VoiceActivityDetector:
             audio = self._finalize_utterance() if accepted else None
             if accepted:
                 st.accepted += 1
+                self.last_level = self._utterance_level()
                 log(f"[VAD] utterance CERRADA y aceptada: "
                     f"{self._speech_frame_count * FRAME_MS} ms de voz, "
                     f"{len(self._utterance) * FRAME_MS} ms totales, "

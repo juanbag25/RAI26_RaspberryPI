@@ -15,6 +15,15 @@ Una vez despierto queda una ventana de WAKE_WINDOW_S segundos para seguir la
 charla sin repetir el nombre; cada frase aceptada la renueva, y también la
 renueva el SPEAK_END del orquestador (recién terminó de contestar: lo natural
 es que le sigan hablando).
+
+Atención: despertarse no es "escuchar todo lo que pase el VAD durante N
+segundos" sino "prestarle atención a QUIEN me llamó". Al despertar se guarda el
+nivel de voz de la utterance que traía el "rai" y, mientras dure la ventana,
+sólo se aceptan frases que lleguen al menos a ese nivel × ATTENTION_LEVEL_RATIO
+(`accepts_level`, consultado por main.py ANTES de transcribir: el fondo de la
+sala ni siquiera gasta una llamada a Whisper). La referencia sigue a la persona
+con una EMA por frase aceptada, y decir "rai" de nuevo la re-engancha a quien
+lo dijo.
 """
 
 from __future__ import annotations
@@ -25,6 +34,8 @@ import unicodedata
 
 from log import log
 from config import (
+    ATTENTION_FOLLOW_ALPHA,
+    ATTENTION_LEVEL_RATIO,
     WAKE_ACK_TEXT,
     WAKE_SEARCH_WORDS,
     WAKE_WINDOW_S,
@@ -50,6 +61,8 @@ class WakeWord:
         self._words = {normalize(w) for w in WAKE_WORDS if normalize(w)}
         self._lock = threading.Lock()
         self._awake_until = 0.0
+        # Nivel (p90 RMS) de la voz a la que le estamos prestando atención.
+        self._focus_level = 0.0
 
     # -- estado ---------------------------------------------------------------
 
@@ -63,13 +76,51 @@ class WakeWord:
             if time.monotonic() < self._awake_until:
                 self._awake_until = time.monotonic() + WAKE_WINDOW_S
 
-    def _wake(self) -> None:
+    def _wake(self, level: float | None = None) -> None:
         with self._lock:
             self._awake_until = time.monotonic() + WAKE_WINDOW_S
+            if level is not None and level > 0:
+                self._focus_level = level
+
+    def _follow(self, level: float) -> None:
+        """La persona se movió un poco: la referencia la sigue (EMA)."""
+        if level <= 0:
+            return
+        with self._lock:
+            if self._focus_level <= 0:
+                self._focus_level = level
+            else:
+                self._focus_level = ((1.0 - ATTENTION_FOLLOW_ALPHA) * self._focus_level
+                                     + ATTENTION_FOLLOW_ALPHA * level)
 
     def sleep(self) -> None:
         with self._lock:
             self._awake_until = 0.0
+            self._focus_level = 0.0
+
+    def focus_level(self) -> float:
+        with self._lock:
+            return self._focus_level
+
+    def min_level(self) -> float:
+        """Nivel mínimo que hoy le exigimos a una frase para atenderla
+        (0 = sin exigencia: dormido, o atención desactivada)."""
+        if ATTENTION_LEVEL_RATIO <= 0 or not WAKE_WORD_ENABLED or not self.is_awake():
+            return 0.0
+        return self.focus_level() * ATTENTION_LEVEL_RATIO
+
+    def accepts_level(self, level: float) -> bool:
+        """¿Vale la pena transcribir una utterance de este nivel?
+
+        Dormido: sí, cualquier cosa que pasó el filtro de cercanía puede ser el
+        "rai". Despierto: sólo si suena tan fuerte como quien nos llamó.
+        """
+        minimum = self.min_level()
+        if level >= minimum:
+            return True
+        log(f"[WAKE] atención: ignorado, más flojo que quien me llamó "
+            f"(nivel={level:.4f} < {minimum:.4f}, foco={self.focus_level():.4f})")
+        return False
 
     # -- filtro ---------------------------------------------------------------
 
@@ -98,9 +149,11 @@ class WakeWord:
                 return end - 1
         return None
 
-    def filter(self, text: str) -> str | None:
+    def filter(self, text: str, level: float = 0.0) -> str | None:
         """Qué mandarle al orquestador para esta transcripción.
 
+        `level` es el nivel (p90 RMS) de la utterance de donde salió `text`:
+        fija el foco de atención al despertar y lo actualiza mientras dura.
         Devuelve el texto a enviar, o None si hay que ignorar la frase.
         Cuando la frase es sólo el nombre, devuelve WAKE_ACK_TEXT (o None si
         está vacío: despierta en silencio).
@@ -119,17 +172,21 @@ class WakeWord:
         if index is None:
             if self.is_awake():
                 self._wake()  # sigue la conversación: renueva la ventana
-                log(f"[WAKE] ya despierto, sigue la charla (ventana +{WAKE_WINDOW_S:.0f}s)")
+                self._follow(level)
+                log(f"[WAKE] ya despierto, sigue la charla (ventana +{WAKE_WINDOW_S:.0f}s, "
+                    f"foco={self.focus_level():.4f})")
                 return text
             log(f"[WAKE] dormido, ignorado: {text}")
             return None
 
-        self._wake()
+        # Despierta Y se engancha al nivel de voz de quien lo llamó.
+        self._wake(level)
         # Sacar el nombre y lo que venga antes ("che rai, vení" -> "vení"):
         # al LLM le llega la instrucción sola.
         rest = " ".join(text.split()[owners[index] + 1:]).lstrip(" ,.;:-—").strip()
         if not rest:
             log(f"[WAKE] despierto por «{text}» (sin instrucción, mando ack={WAKE_ACK_TEXT!r})")
             return WAKE_ACK_TEXT or None
-        log(f"[WAKE] despierto por «{text}»")
+        log(f"[WAKE] despierto por «{text}» (foco={self.focus_level():.4f}, "
+            f"mínimo={self.min_level():.4f})")
         return rest

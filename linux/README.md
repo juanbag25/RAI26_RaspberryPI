@@ -209,6 +209,13 @@ transcribe hasta que alguien lo llama por su nombre.
 - El nombre (y lo que venga antes) se recorta: al LLM le llega la instrucción
   sola. Si la frase es sólo "rai", se manda `WAKE_ACK_TEXT` para que conteste y
   se note que está escuchando (poné `""` para que despierte en silencio).
+- **Atención a quien lo llamó**: despertarse no es "escuchar todo lo que pase
+  el VAD durante N segundos". Al despertar se guarda el nivel de voz del "rai"
+  y, mientras dure la ventana, sólo se aceptan frases que lleguen al menos a
+  `nivel × ATTENTION_LEVEL_RATIO` (default 0.6) — se chequea **antes** de
+  transcribir, así que el fondo de la sala ni gasta Whisper. La referencia
+  sigue a la persona (EMA por frase) y decir "rai" de nuevo la re-engancha a
+  quien lo dijo. Log: `[WAKE] atención: ignorado, más flojo que quien me llamó`.
 - Después queda despierto `WAKE_WINDOW_S` segundos para seguir la conversación
   sin repetir el nombre. Cada frase aceptada renueva la ventana, y también la
   renueva el `SPEAK_END` del orquestador (acaba de contestar: lo natural es que
@@ -219,6 +226,7 @@ Desde `linux/.env`:
 ```bash
 WAKE_WORD_ENABLED=true    # false = como antes, atiende todo lo que pasa el VAD
 WAKE_WINDOW_S=25
+ATTENTION_LEVEL_RATIO=0.6 # 0.8 = más cerrado sobre quien lo llamó; 0 = off
 ```
 
 ## Tuning
