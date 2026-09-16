@@ -53,6 +53,17 @@ ORCHESTRATOR_CONNECT_TIMEOUT_S = 3.0
 # Es la línea a mirar cuando "se queda escuchando y no pasa nada".
 HEARTBEAT_S = float(os.getenv("LOG_HEARTBEAT_S", "10") or 0)
 
+# Si una utterance lleva más de esto esperando en la cola de STT, se descarta
+# en vez de transcribirla: sin este tope, si STT+red tardan más que el ritmo
+# al que habla la gente, se arma un backlog y el robot termina contestando
+# cosas viejas mucho después de que se dijeron.
+MAX_QUEUE_AGE_S = float(os.getenv("MAX_QUEUE_AGE_S", "4") or 4)
+
+# Sólo para pruebas: simula un STT lento para poder armar backlog a propósito
+# y ver el drop-de-viejas en acción (default 0 = sin delay, comportamiento
+# normal). Ver STT_FAKE_DELAY_S en .env.example.
+STT_FAKE_DELAY_S = float(os.getenv("STT_FAKE_DELAY_S", "0") or 0)
+
 _NORMALIZED_PROMPT = normalize(STT_PROMPT)
 
 
@@ -117,6 +128,7 @@ class Counters:
         self.send_failed = 0
         self.muted_frames = 0   # frames descartados por SPEAK_START
         self.unfocused = 0      # utterances más flojas que quien nos llamó
+        self.dropped_stale = 0  # utterances descartadas por vieja/atrasada en cola
 
 
 def transcribe_worker(
@@ -139,11 +151,36 @@ def transcribe_worker(
         item = audio_queue.get()
         if item is None:  # señal de shutdown
             return
-        audio, level = item
+        # Si mientras esperábamos se acumularon más utterances, sólo nos
+        # importa la más nueva: si no, se responde tarde a algo que la
+        # persona ya dio por perdido (y probablemente repitió).
+        while True:
+            try:
+                newer = audio_queue.get_nowait()
+            except queue.Empty:
+                break
+            counters.dropped_stale += 1
+            if newer is None:  # señal de shutdown
+                return
+            log("[STT] utterance superada por una más nueva en cola, descartada")
+            item = newer
+        audio, level, queued_at = item
+        age = time.monotonic() - queued_at
+        if age > MAX_QUEUE_AGE_S:
+            counters.dropped_stale += 1
+            log(f"[STT] utterance descartada por vieja ({age:.1f}s en cola, "
+                f"nivel={level:.4f})")
+            continue
         seconds = len(audio) / 16000.0
         pending = audio_queue.qsize()
         log(f"[STT] transcribiendo {seconds:.1f}s de audio"
             + (f" ({pending} más en cola)" if pending else "") + "...")
+        if STT_FAKE_DELAY_S:
+            # Sólo para probar el manejo de cola/backlog a propósito: simula
+            # un STT lento (ej. Whisper local en una Pi cargada) sin tener
+            # que esperar a que pase de verdad.
+            log(f"[STT] (fake delay de prueba: {STT_FAKE_DELAY_S:.1f}s)")
+            time.sleep(STT_FAKE_DELAY_S)
         t0 = time.monotonic()
         text = transcriber.transcribe(audio)
         elapsed = time.monotonic() - t0
@@ -205,7 +242,8 @@ def heartbeat_worker(
             f"en_utt={'sí' if vad.in_speech else 'no'} | "
             f"cola_stt={audio_queue.qsize()} stt={counters.transcribed} "
             f"vacías={counters.empty} enviadas={counters.sent} "
-            f"fallidas={counters.send_failed} | "
+            f"fallidas={counters.send_failed} "
+            f"descartadas_viejas={counters.dropped_stale} | "
             f"mute={'SÍ' if mute.is_muted() else 'no'} "
             f"wake={'despierto' if wake.is_awake() else 'dormido'}"
             + (f" foco={wake.focus_level():.4f} mínimo={wake.min_level():.4f} "
@@ -301,6 +339,21 @@ def main() -> None:
                     # hablar es viejo: no dejar que se cierre (y se envíe)
                     # recién al desmutear.
                     vad.discard_open_utterance()
+                    # Utterances que ya se habían cerrado y encolado antes de
+                    # este mute también son viejas: sin esto, se transcriben
+                    # y mandan igual, recién cuando el robot ya terminó de
+                    # hablar, como si fueran del turno actual.
+                    drained = 0
+                    while True:
+                        try:
+                            audio_queue.get_nowait()
+                        except queue.Empty:
+                            break
+                        drained += 1
+                    if drained:
+                        counters.dropped_stale += drained
+                        log(f"[MAIN] {drained} utterance(s) en cola descartada(s) "
+                            f"por mute (robot empezó a hablar)")
                 counters.muted_frames += 1
                 continue
             was_muted = False
@@ -312,7 +365,7 @@ def main() -> None:
                 if not wake.accepts_level(level):
                     counters.unfocused += 1
                     continue
-                audio_queue.put((audio, level))
+                audio_queue.put((audio, level, time.monotonic()))
                 log(f"[MAIN] utterance encolada para STT (nivel={level:.4f}, "
                     f"cola={audio_queue.qsize()})")
 
