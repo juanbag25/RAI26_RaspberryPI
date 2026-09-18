@@ -25,13 +25,23 @@ class LinuxAudioCapture:
     def frames(self) -> Iterator[bytes]:
         log(f"[AUDIO] abriendo stream: device={self._device_id} "
             f"{SAMPLE_RATE} Hz mono int16, bloque={self._blocksize} samples ({FRAME_MS} ms)")
-        with sd.RawInputStream(
-            samplerate=SAMPLE_RATE,
-            blocksize=self._blocksize,
-            channels=1,
-            dtype="int16",
-            device=self._device_id,
-        ) as stream:
+        try:
+            stream = sd.RawInputStream(
+                samplerate=SAMPLE_RATE,
+                blocksize=self._blocksize,
+                channels=1,
+                dtype="int16",
+                device=self._device_id,
+            )
+        except sd.PortAudioError as exc:
+            # "Error querying device -1" = PortAudio no ve NINGUNA entrada:
+            # mic USB desconectado o no enumerado por ALSA.
+            log(f"[AUDIO ERROR] no pude abrir el mic (device={self._device_id}): {exc}", err=True)
+            log("[AUDIO ERROR] ¿mic USB conectado? Revisá `arecord -l` y el listado de "
+                "arriba; si aparece pero no es el default, poné su índice en "
+                "AUDIO_INPUT_DEVICE (.env)", err=True)
+            raise
+        with stream:
             log(f"[AUDIO] stream abierto (latencia={stream.latency * 1000:.0f} ms)")
             try:
                 while True:

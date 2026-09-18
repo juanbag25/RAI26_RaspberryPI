@@ -22,8 +22,13 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(dirname "$HERE")"
+# STT_SERVICE se puede fijar en linux/.env (STT_SERVICE=nombre-del-servicio).
+if [ -z "${STT_SERVICE:-}" ] && [ -f "$HERE/.env" ]; then
+    STT_SERVICE="$(grep -E '^STT_SERVICE=' "$HERE/.env" | tail -n1 | cut -d= -f2- | tr -d '"' | tr -d "'" || true)"
+fi
 SERVICE="${STT_SERVICE:-stt}"
 PORT="${ORCHESTRATOR_PORT:-9000}"
+CTRL_PORT="${CTRL_PORT:-9001}"
 
 log() { printf '[dev] %s\n' "$*"; }
 die() { printf '[dev] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -42,14 +47,26 @@ stop_running() {
         log "frenando servicio ${SERVICE}.service"
         sudo systemctl stop "$SERVICE"
     fi
-    # main.py suelto (tmux, nohup, otra terminal). Excluir este script y su hijo.
+    # main.py suelto (tmux, nohup, otra terminal), lanzado desde cualquier
+    # cwd: "python linux/main.py" o "python main.py". También mic_level.py y
+    # wake_spotter.py, que agarran el mic igual.
     local pids
-    pids="$(pgrep -f 'python.*linux/main\.py' || true)"
+    pids="$(pgrep -f 'python[0-9.]* .*(main|mic_level|wake_spotter)\.py' || true)"
     if [ -n "$pids" ]; then
         log "matando main.py suelto (pids: $(echo "$pids" | tr '\n' ' '))"
+        # sudo: si lo lanzó un servicio como root, kill sin sudo falla callado.
         # shellcheck disable=SC2086
-        kill $pids 2>/dev/null || true
+        sudo kill $pids 2>/dev/null || true
         sleep 1
+    fi
+    # Si el puerto de control sigue tomado, hay OTRO main.py que no vimos
+    # (servicio con otro nombre). Mejor frenar acá que arrancar y explotar.
+    local owner
+    owner="$(sudo ss -ltnp 2>/dev/null | grep ":${CTRL_PORT} " || true)"
+    if [ -n "$owner" ]; then
+        printf '%s\n' "$owner" >&2
+        die "el puerto ${CTRL_PORT} sigue ocupado por el proceso de arriba. Si es un servicio," \
+            "frenalo y/o poné su nombre: STT_SERVICE=<nombre> $0 ... (o en linux/.env)"
     fi
 }
 
