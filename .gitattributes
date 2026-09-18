@@ -1,0 +1,2 @@
+# Scripts corren en la Pi (bash): siempre LF aunque el checkout sea en Windows.
+*.sh text eol=lf

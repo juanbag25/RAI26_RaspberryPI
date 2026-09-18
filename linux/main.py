@@ -26,12 +26,15 @@ from config import (
     FRAME_MS,
     NEAR_RMS_THRESHOLD,
     STT_PROMPT,
+    WAKE_MODE,
+    WAKE_PHRASES,
     WAKE_WINDOW_S,
     WAKE_WORD_ENABLED,
 )
 from ctrl_server import SpeakMute, start_in_background
 from log import DEBUG, log
 from vad import VoiceActivityDetector
+from wake_sound import WakeSound
 from wake_word import WakeWord, normalize
 
 if BACKEND == "groq":
@@ -117,6 +120,9 @@ class Counters:
         self.send_failed = 0
         self.muted_frames = 0   # frames descartados por SPEAK_START
         self.unfocused = 0      # utterances más flojas que quien nos llamó
+        self.wakes = 0          # disparos del spotter de audio
+        self.asleep = 0         # utterances descartadas por estar dormido (modo audio)
+        self.beep_frames = 0    # frames descartados mientras sonaba el beep
 
 
 def transcribe_worker(
@@ -170,6 +176,7 @@ def heartbeat_worker(
     vad: VoiceActivityDetector,
     mute: SpeakMute,
     wake: WakeWord,
+    spotter,
     audio_queue: "queue.Queue",
     counters: Counters,
 ) -> None:
@@ -189,6 +196,14 @@ def heartbeat_worker(
         muted_now = counters.muted_frames
         muted_delta, last_muted = muted_now - last_muted, muted_now
         expected = int(HEARTBEAT_S * 1000 / FRAME_MS)
+        spot_note = ""
+        if spotter is not None:
+            sp = spotter.pop_stats()
+            spot_note = (f" | spot frames={sp.frames} desc={sp.dropped} "
+                         f"cola={spotter.queue_size()} wakes={counters.wakes} "
+                         f"dormido_desc={counters.asleep} oyó={sp.last_text!r}")
+            if sp.dropped:
+                spot_note += "  <-- el spotter no da abasto (¿CPU?)"
         audio_note = ""
         if st.frames + muted_delta == 0:
             audio_note = "  <-- SIN AUDIO DEL MIC"
@@ -209,7 +224,7 @@ def heartbeat_worker(
             f"wake={'despierto' if wake.is_awake() else 'dormido'}"
             + (f" foco={wake.focus_level():.4f} mínimo={wake.min_level():.4f} "
                f"ignoradas_por_foco={counters.unfocused}" if wake.is_awake() else "")
-            + f"{audio_note}"
+            + f"{spot_note}{audio_note}"
         )
         if POWER_LOG_S > 0 and time.monotonic() - last_power >= POWER_LOG_S:
             last_power = time.monotonic()
@@ -252,11 +267,29 @@ def main() -> None:
     mute = SpeakMute(on_speak_end=wake.refresh)
     start_in_background(CTRL_PORT, mute)
     log(f"Speak-mute control server on 0.0.0.0:{CTRL_PORT}")
-    if WAKE_WORD_ENABLED:
-        log(f"Wake word activo: decile «rai» para que escuche "
-            f"(ventana de {WAKE_WINDOW_S:.0f}s por turno)")
+
+    # Wake por audio: spotter local (Vosk) + beep. Si no puede arrancar, el
+    # robot sigue funcionando con el wake por texto de siempre.
+    spotter = None
+    sound = WakeSound()
+    if WAKE_WORD_ENABLED and WAKE_MODE == "audio":
+        try:
+            from wake_spotter import WakeSpotter
+            spotter = WakeSpotter()
+        except Exception as exc:  # noqa: BLE001 - ImportError, modelo ausente...
+            log(f"[SPOT] no pude arrancar el wake por audio ({type(exc).__name__}: {exc}); "
+                f"caigo a WAKE_MODE=text", err=True)
+    elif WAKE_WORD_ENABLED and WAKE_MODE != "text":
+        log(f"[SPOT] WAKE_MODE={WAKE_MODE!r} desconocido, uso 'text'", err=True)
+
+    if not WAKE_WORD_ENABLED:
+        log("Wake word DESACTIVADO (WAKE_WORD_ENABLED=False)")
+    elif spotter is not None:
+        log(f"Wake word por AUDIO: decile «{WAKE_PHRASES[0]}» y esperá el beep "
+            f"(ventana de {WAKE_WINDOW_S:.0f}s por turno; dormido no se transcribe nada)")
     else:
-        log("Wake word DESACTIVADO (WAKE_WORD_ENABLED=False en config.py)")
+        log(f"Wake word por TEXTO: decile «rai» para que escuche "
+            f"(ventana de {WAKE_WINDOW_S:.0f}s por turno)")
     log(f"Foco del mic: umbral de cercanía NEAR_RMS_THRESHOLD="
         f"{NEAR_RMS_THRESHOLD} (calibrar con mic_level.py)")
     log(f"Logs: heartbeat cada {HEARTBEAT_S:.0f}s (LOG_HEARTBEAT_S), "
@@ -277,7 +310,7 @@ def main() -> None:
     if HEARTBEAT_S > 0:
         threading.Thread(
             target=heartbeat_worker,
-            args=(vad, mute, wake, audio_queue, counters),
+            args=(vad, mute, wake, spotter, audio_queue, counters),
             daemon=True,
         ).start()
 
@@ -302,11 +335,36 @@ def main() -> None:
                 counters.muted_frames += 1
                 continue
             was_muted = False
+            # Suena el beep de wake: no escucharse a sí mismo.
+            if sound.is_playing():
+                counters.beep_frames += 1
+                continue
+            if spotter is not None:
+                spotter.feed(frame)
+                heard = spotter.take_detection()
+                if heard:
+                    counters.wakes += 1
+                    # El nivel de la utterance en curso es el de quien dijo
+                    # "oye rai": a eso le prestamos atención.
+                    wake.wake_from_audio(vad.current_level())
+                    # El "oye rai" ya cumplió: no gastar Groq en transcribirlo.
+                    # Si la persona sigue hablando, el VAD abre otra utterance
+                    # enseguida (pre-buffer de 200 ms) y esa sí va a Groq.
+                    vad.discard_open_utterance(reason="wake por audio")
+                    sound.play()
+                    continue
             closed, audio = vad.process_frame(frame)
             if closed and audio is not None:
+                level = vad.last_level
+                # Modo audio: dormido no se transcribe nada. Sólo el spotter
+                # escucha, y hasta que no oiga "oye rai" Groq no se entera.
+                if spotter is not None and not wake.is_awake():
+                    counters.asleep += 1
+                    log(f"[MAIN] dormido: utterance descartada sin transcribir "
+                        f"(nivel={level:.4f}; decí «{WAKE_PHRASES[0]}»)")
+                    continue
                 # Atención: despierto, sólo transcribimos lo que suena tan
                 # fuerte como quien dijo "rai" (el fondo no gasta Whisper).
-                level = vad.last_level
                 if not wake.accepts_level(level):
                     counters.unfocused += 1
                     continue

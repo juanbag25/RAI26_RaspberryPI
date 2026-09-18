@@ -93,6 +93,17 @@ class WakeWord:
                 self._focus_level = ((1.0 - ATTENTION_FOLLOW_ALPHA) * self._focus_level
                                      + ATTENTION_FOLLOW_ALPHA * level)
 
+    def wake_from_audio(self, level: float) -> None:
+        """El spotter de audio (wake_spotter.py) reconoció la frase de wake.
+
+        Mismo efecto que encontrar "rai" en el texto: abre la ventana y se
+        engancha al nivel de voz de quien lo llamó (`level` = p90 de la
+        utterance en curso, 0 si el VAD todavía no abrió una).
+        """
+        self._wake(level)
+        log(f"[WAKE] despierto por audio (foco={self.focus_level():.4f}, "
+            f"mínimo={self.min_level():.4f}, ventana {WAKE_WINDOW_S:.0f}s)")
+
     def sleep(self) -> None:
         with self._lock:
             self._awake_until = 0.0

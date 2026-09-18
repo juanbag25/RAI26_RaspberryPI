@@ -93,7 +93,7 @@ class VoiceActivityDetector:
     def in_speech(self) -> bool:
         return self._in_speech
 
-    def discard_open_utterance(self) -> bool:
+    def discard_open_utterance(self, reason: str = "el robot empezó a hablar") -> bool:
         """Tira la utterance en curso (si hay) sin transcribirla.
 
         Lo llama main.py al entrar en mute: si el robot empezó a hablar con
@@ -101,11 +101,13 @@ class VoiceActivityDetector:
         queda congelado a mitad de frase. Al desmutear vería silencio, la
         cerraría y mandaría a transcribir audio de ANTES de que el robot
         hablara — una frase vieja que el orquestador contestaría como si fuera
-        nueva. Devuelve True si había algo abierto.
+        nueva. También lo llama cuando el spotter de audio dispara: el "oye
+        rai" ya cumplió, no hace falta transcribirlo. Devuelve True si había
+        algo abierto.
         """
         if not self._in_speech:
             return False
-        log(f"[VAD] utterance descartada: el robot empezó a hablar "
+        log(f"[VAD] utterance descartada: {reason} "
             f"({self._speech_frame_count * FRAME_MS} ms de voz se pierden)")
         self._stats.rejected += 1
         self._reset_utterance()
@@ -206,6 +208,15 @@ class VoiceActivityDetector:
                 f"{near_threshold:.4f}, ruido={self._noise_floor:.4f})")
             return False
         return True
+
+    def current_level(self) -> float:
+        """Nivel (p90) de la utterance ABIERTA hasta ahora (0 si no hay).
+
+        Lo usa main.py cuando el spotter de audio dispara a mitad de frase:
+        el "oye rai" todavía no cerró, pero ya sabemos cuán fuerte suena
+        quien lo dijo para fijar el foco de atención.
+        """
+        return self._utterance_level() if self._in_speech else 0.0
 
     def _utterance_level(self) -> float:
         """Percentil 90 del RMS de los frames de voz.

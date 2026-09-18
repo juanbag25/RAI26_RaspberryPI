@@ -24,6 +24,19 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw in ("1", "true", "yes", "on", "si", "sí")
 
 
+def _env_str(name: str, default: str) -> str:
+    raw = os.getenv(name)
+    return default if raw is None else raw.strip()
+
+
+def _env_list(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    """Lista separada por comas en .env ("oye rai, oye ray")."""
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    return tuple(item.strip() for item in raw.split(",") if item.strip())
+
+
 SAMPLE_RATE = 16000
 FRAME_MS = 30
 
@@ -98,6 +111,39 @@ NOISE_FLOOR_MAX = _env_float("NOISE_FLOOR_MAX", 0.02)
 # lo llama por su nombre. Después queda "despierto" una ventana de tiempo para
 # seguir la conversación sin repetir el nombre en cada frase.
 WAKE_WORD_ENABLED = _env_bool("WAKE_WORD_ENABLED", True)
+# Cómo se detecta el nombre:
+#   "audio": spotter local (Vosk) escuchando "oye rai" todo el tiempo. Dormido
+#            no se manda NADA a Groq; al reconocer la frase suena un beep y
+#            recién ahí se transcribe. Es el modo "como Siri" (wake_spotter.py).
+#   "text":  se transcribe cada frase que pasa el VAD y se busca "rai" en el
+#            texto (wake_word.py). Más lento (~2 s) y gasta Groq dormido, pero
+#            no necesita el modelo Vosk. Si "audio" no puede arrancar (vosk no
+#            instalado, modelo ausente) se cae a este modo solo.
+WAKE_MODE = _env_str("WAKE_MODE", "audio").lower()
+# Frases que despiertan al robot en modo "audio". Vosk las reconoce con una
+# gramática cerrada (todo lo demás es "[unk]"), así que conviene que sean de
+# 2+ palabras: "rai" solo es una sílaba y dispararía con cualquier cosa.
+# "rai" no es palabra del español y el modelo suele escucharlo como "ray" o
+# "rey": por eso están las tres. Agregá variantes con el prefijo que uses
+# ("hola rai", "che rai") en .env: WAKE_PHRASES=oye rai,oye ray,hola rai
+WAKE_PHRASES = _env_list("WAKE_PHRASES", ("oye rai", "oye ray", "oye rey"))
+# Disparar con el resultado PARCIAL del reconocedor (apenas ve la frase) en
+# vez de esperar a que Vosk cierre la utterance. Más rápido (~300 ms antes).
+WAKE_ON_PARTIAL = _env_bool("WAKE_ON_PARTIAL", True)
+# Tras un disparo, ignorar nuevos disparos por este tiempo (la misma frase
+# suele aparecer dos veces: parcial y final).
+WAKE_COOLDOWN_S = _env_float("WAKE_COOLDOWN_S", 1.5)
+# Segundos de audio que puede acumular la cola del spotter si la Pi se
+# atrasa; más allá se descartan frames (se pierde un wake, no se traba el mic).
+WAKE_QUEUE_S = _env_float("WAKE_QUEUE_S", 3.0)
+# Modelo Vosk (carpeta descomprimida). Ver README para descargarlo.
+WAKE_MODEL_NAME = _env_str("WAKE_MODEL_NAME", "vosk-model-small-es-0.42")
+# Sonido al despertar: "beep" (generado), "none", o ruta a un .wav 16-bit.
+WAKE_SOUND = _env_str("WAKE_SOUND", "beep")
+WAKE_SOUND_VOLUME = _env_float("WAKE_SOUND_VOLUME", 0.4)
+# Parlante para el beep (índice de sounddevice; vacío = default del sistema).
+_out = _env_str("AUDIO_OUTPUT_DEVICE", "")
+WAKE_SOUND_DEVICE = int(_out) if _out else None
 # Variantes con las que Whisper suele escribir "rai". Se comparan en minúsculas,
 # sin acentos ni puntuación (y también sobre las iniciales pegadas: "R.A.I." ->
 # "r a i" -> "rai").
@@ -114,8 +160,9 @@ WAKE_SEARCH_WORDS = int(_env_float("WAKE_SEARCH_WORDS", 3))
 WAKE_WINDOW_S = _env_float("WAKE_WINDOW_S", 25.0)
 # Si la frase es SÓLO el nombre ("rai"), qué mandarle al orquestador para que
 # conteste algo y se note que está escuchando. "" = no mandar nada (sólo abre
-# la ventana en silencio).
-WAKE_ACK_TEXT = "rai"
+# la ventana en silencio). En modo "audio" el beep ya hace de confirmación y
+# el "oye rai" solo ni siquiera se transcribe, así que por defecto va vacío.
+WAKE_ACK_TEXT = _env_str("WAKE_ACK_TEXT", "rai" if WAKE_MODE == "text" else "")
 # Atención: al despertarse, el robot se queda con el NIVEL de la voz que lo
 # llamó y, mientras dure la ventana, sólo acepta frases que lleguen al menos a
 # ese nivel × ATTENTION_LEVEL_RATIO. Quien está más lejos que quien dijo "rai"
@@ -128,3 +175,4 @@ ATTENTION_FOLLOW_ALPHA = 0.3
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(_HERE, "..", "models", f"faster-whisper-{MODEL_SIZE}")
+WAKE_MODEL_PATH = os.path.join(_HERE, "..", "models", WAKE_MODEL_NAME)

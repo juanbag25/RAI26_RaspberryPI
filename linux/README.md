@@ -77,6 +77,22 @@ BACKEND = "local"
 MODEL_SIZE = "small"
 ```
 
+## 4b. Vosk model (wake word por audio)
+
+`WAKE_MODE=audio` (el default) necesita el modelo chico de Vosk en español
+(~40 MB, ~100 MB descomprimido) en `models/`:
+
+```bash
+cd ~/stt-project
+mkdir -p models && cd models
+wget https://alphacephei.com/vosk/models/vosk-model-small-es-0.42.zip
+unzip vosk-model-small-es-0.42.zip && rm vosk-model-small-es-0.42.zip
+```
+
+Si falta, `main.py` avisa y arranca en `WAKE_MODE=text` (funciona igual, más
+lento). Probalo solo con `python wake_spotter.py` y el beep con
+`python wake_sound.py`.
+
 ## 5. Configure the `.env`
 
 Create `linux/.env` (it's already gitignored; see `linux/.env.example`):
@@ -186,10 +202,48 @@ NEAR_RMS_THRESHOLD=0.07
 NEAR_SNR_RATIO=3
 ```
 
-## Wake word: "rai"
+## Wake word: "oye rai"
 
-Segundo filtro, ahora sobre el **texto**: el robot descarta todo lo que
-transcribe hasta que alguien lo llama por su nombre.
+El robot descarta todo hasta que alguien lo llama. Hay dos modos (`WAKE_MODE`):
+
+### Modo `audio` (default): spotter local + beep
+
+Como un celular con Siri: un detector chico corre **siempre** sobre el audio
+([`wake_spotter.py`](wake_spotter.py), Vosk con gramática cerrada), y mientras
+el robot duerme **no se manda nada a Groq**. Al reconocer "oye rai" suena un
+beep ([`wake_sound.py`](wake_sound.py)), el robot se despierta en ~0.3 s y
+recién ahí las frases van a Groq.
+
+```
+>>> ¿viste el partido de ayer?
+[MAIN] dormido: utterance descartada sin transcribir (nivel=0.0812; decí «oye rai»)
+>>> oye rai
+[SPOT] wake detectado (parcial): «oye ray»
+[WAKE] despierto por audio (foco=0.1547, mínimo=0.0928, ventana 25s)
+[VAD] utterance descartada: wake por audio (780 ms de voz se pierden)   <- el "oye rai" no se transcribe
+   *beep*
+>>> vení para acá
+[STT] 0.61s >>> Vení para acá.
+[NET] enviado al orquestador ...
+```
+
+- La frase de wake tiene que sonar *parecido*, no exacto: Vosk sólo puede
+  devolver una de `WAKE_PHRASES` o `[unk]`, así que "hola rai" también suele
+  disparar como "oye ray". "rai" no es palabra del español y sale como
+  "ray"/"rey"; por eso las tres variantes están en el default.
+- Decir "oye rai" mientras ya está despierto re-engancha el foco a quien lo
+  dijo (y suena el beep otra vez).
+- Mientras suena el beep el mic se ignora (~230 ms) para no transcribirse el
+  propio beep. Si no hay parlante, `WAKE_SOUND=none` (o se desactiva solo al
+  fallar) y el wake funciona igual.
+- El texto que llega a Groq después del beep pasa igual por el filtro de
+  texto de abajo: si Whisper escribe "rai vení" se recorta a "vení".
+
+### Modo `text`: sobre la transcripción
+
+Sin modelo extra: cada frase que pasa el VAD se transcribe y se busca "rai" en
+el texto ([`wake_word.py`](wake_word.py)). Más lento (~2 s hasta que se entera)
+y gasta Groq aunque duerma; es el fallback si Vosk no arranca.
 
 ```
 >>> ¿viste el partido de ayer?
@@ -198,9 +252,6 @@ transcribe hasta que alguien lo llama por su nombre.
 [WAKE] despierto por «Rai, vení para acá»     -> se manda "vení para acá"
 ```
 
-- Se hace sobre la transcripción y no con un keyword spotter de audio: la
-  utterance ya pasa por Whisper igual, así que sale gratis y no agrega modelos
-  ni dependencias ([`wake_word.py`](wake_word.py)).
 - El match ignora mayúsculas, acentos y puntuación, acepta las variantes con las
   que Whisper suele escribirlo (`WAKE_WORDS`: rai, ray, rae, raid…, incluido
   "R.A.I.") y sólo lo busca en las primeras `WAKE_SEARCH_WORDS` palabras.
@@ -225,6 +276,10 @@ Desde `linux/.env`:
 
 ```bash
 WAKE_WORD_ENABLED=true    # false = como antes, atiende todo lo que pasa el VAD
+WAKE_MODE=audio           # audio | text
+WAKE_PHRASES=oye rai,oye ray,oye rey   # agregá "hola rai", "che rai"...
+WAKE_SOUND=beep           # beep | none | /ruta/ding.wav
+AUDIO_OUTPUT_DEVICE=      # parlante para el beep (índice de sounddevice)
 WAKE_WINDOW_S=25
 ATTENTION_LEVEL_RATIO=0.6 # 0.8 = más cerrado sobre quien lo llamó; 0 = off
 ```
@@ -235,8 +290,9 @@ All knobs live in [`linux/config.py`](config.py): `BACKEND`, `MODEL_SIZE`,
 `LANGUAGE`, `STT_PROMPT`, `VAD_AGGRESSIVENESS`, `SILENCE_MS`,
 `PRE_SPEECH_PADDING_MS`, `MIN_UTTERANCE_MS`, los del foco del mic
 (`RMS_THRESHOLD`, `NEAR_RMS_THRESHOLD`, `NEAR_SNR_RATIO`, `ONSET_SPEECH_FRAMES`,
-`NOISE_FLOOR_*`) y los del wake word (`WAKE_*`). Los más usados se pueden pisar
-desde `linux/.env` — ver `.env.example`. Para el resto, ver el root README.
+`NOISE_FLOOR_*`) y los del wake word (`WAKE_*`, `AUDIO_OUTPUT_DEVICE`). Los más
+usados se pueden pisar desde `linux/.env` — ver `.env.example`. Para el resto,
+ver el root README.
 
 ## Logs y diagnóstico
 
@@ -315,6 +371,51 @@ cae bajo carga: probar cable más corto/grueso.
 - **Sigue enganchando conversaciones ajenas** — subí `NEAR_RMS_THRESHOLD` (y/o
   `NEAR_SNR_RATIO`) con `mic_level.py` en la mano; el wake word tapa el resto.
 - **High CPU / slow transcription** — on a Pi 5, stick to `tiny`, `base` or `small` for the local backend, or use the Groq backend.
+- **No despierta con "oye rai"** — mirá `oyó=...` en la línea `[HB]`: es lo último que Vosk entendió. Si dice `'oye'` y nunca `'oye ray'`, probá `LOG_DEBUG=1` y `python wake_spotter.py`, hablá más cerca, o agregá la variante que veas a `WAKE_PHRASES`. Si `desc=` (frames descartados del spotter) crece, la Pi no da abasto.
+- **Despierta solo** — sacá variantes de `WAKE_PHRASES` (dejá sólo `oye rai,oye ray`) o subí `WAKE_COOLDOWN_S`. Si hay un parlante cerca del mic, bajá `WAKE_SOUND_VOLUME`.
+- **No suena el beep** — `python wake_sound.py`; si falla, elegí el parlante con `AUDIO_OUTPUT_DEVICE` (mismo listado que el mic al arrancar) o `WAKE_SOUND=none`.
+
+## Probar con tu PC como orquestador (Tailscale)
+
+Para desarrollar el orquestador en tu compu sin tocar el robot: la Pi entra a
+tu tailnet y `dev_orchestrator.sh` le apunta el STT a tu PC por esa red.
+
+### Una vez: registrar la Pi en Tailscale
+
+En la admin console de Tailscale generá una auth key (Settings → Keys →
+Generate auth key; conviene *reusable* y con tag si usás ACLs). Después, en la
+terminal de la Pi:
+
+```bash
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo tailscale up --auth-key tskey-auth-XXXXXXXXXXXX --hostname rai-pi
+tailscale ip -4      # IP 100.x.y.z de la Pi: va en el orquestador para el mute (puerto 9001)
+tailscale status     # tiene que aparecer tu PC
+```
+
+En la PC: Tailscale instalado y logueado en la misma tailnet, y el orquestador
+escuchando en `0.0.0.0:9000` (no en `127.0.0.1`). Si el orquestador corre en
+WSL2, la PC recibe en Windows pero WSL2 no lo ve: o instalás Tailscale dentro
+de WSL, o activás `networkingMode=mirrored` en `%UserProfile%\.wslconfig`.
+Windows Firewall va a preguntar la primera vez que Python escuche: permitir.
+
+### Cada vez: apuntar la Pi a tu PC
+
+```bash
+./linux/dev_orchestrator.sh mi-pc          # hostname de Tailscale, o la IP 100.x.y.z
+```
+
+Frena el servicio systemd (`STT_SERVICE`, default `stt`) o cualquier
+`main.py` suelto, y corre `main.py` en primer plano con `ORCHESTRATOR_IP`
+pisado por variable de entorno (el `.env` queda intacto). **Ctrl+C** vuelve
+a levantar el servicio si estaba corriendo. Para forzar la vuelta a la Jetson:
+
+```bash
+./linux/dev_orchestrator.sh --restore
+```
+
+Al arrancar imprime la IP Tailscale de la Pi y avisa si nada escucha en
+`IP:9000` (orquestador apagado o firewall).
 
 ## Running headless (optional)
 
