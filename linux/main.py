@@ -25,7 +25,9 @@ from config import (
     CTRL_PORT,
     FRAME_MS,
     NEAR_RMS_THRESHOLD,
+    ORCH_EVENT_PREFIX,
     STT_PROMPT,
+    WAKE_EVENTS_ENABLED,
     WAKE_MODE,
     WAKE_PHRASES,
     WAKE_WINDOW_S,
@@ -172,6 +174,36 @@ def transcribe_worker(
                 counters.send_failed += 1
 
 
+# Cada cuánto el watcher mira si el wake word cambió de estado. Marca el
+# retraso máximo del chime de "despierto" respecto del "oye rai" (más el TCP).
+WAKE_EVENT_POLL_S = 0.1
+
+
+def wake_event_worker(
+    wake: WakeWord,
+    orchestrator_ip: str,
+    orchestrator_port: int,
+) -> None:
+    """Avisa al orquestador cada transición dormido<->despierto.
+
+    Se hace por polling y no con un callback en WakeWord porque dormirse no es
+    un evento: la ventana simplemente vence (`is_awake()` pasa a False solo).
+    Cubre las dos formas de despertar (spotter de audio y "rai" en el texto) y
+    las dos de dormirse (vencimiento y `sleep()`). El envío bloquea hasta 3 s
+    si el orquestador no responde, por eso corre en su propio hilo.
+    """
+    was_awake = wake.is_awake()
+    while True:
+        time.sleep(WAKE_EVENT_POLL_S)
+        awake = wake.is_awake()
+        if awake == was_awake:
+            continue
+        was_awake = awake
+        name = "awake" if awake else "asleep"
+        log(f"[WAKE] -> {'despierto' if awake else 'dormido'}: aviso al orquestador ({name})")
+        send_to_orchestrator(ORCH_EVENT_PREFIX + name, orchestrator_ip, orchestrator_port)
+
+
 def heartbeat_worker(
     vad: VoiceActivityDetector,
     mute: SpeakMute,
@@ -306,6 +338,16 @@ def main() -> None:
         daemon=True,
     )
     worker.start()
+
+    # Chime remoto: el orquestador suena al despertar / dormirse (ver
+    # wake_event_worker). Independiente del beep local (WAKE_SOUND).
+    if WAKE_WORD_ENABLED and WAKE_EVENTS_ENABLED:
+        threading.Thread(
+            target=wake_event_worker,
+            args=(wake, ORCHESTRATOR_IP, ORCHESTRATOR_PORT),
+            daemon=True,
+        ).start()
+        log("Eventos de wake al orquestador: ON (chime remoto al despertar/dormirse)")
 
     if HEARTBEAT_S > 0:
         threading.Thread(

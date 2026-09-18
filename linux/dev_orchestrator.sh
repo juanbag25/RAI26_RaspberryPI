@@ -9,8 +9,8 @@
 #
 # Qué hace:
 #   1. Resuelve el destino (un hostname de Tailscale se traduce con `tailscale ip`).
-#   2. Frena lo que esté corriendo: el servicio systemd (STT_SERVICE, default "stt")
-#      si existe, y cualquier `linux/main.py` suelto (tmux, nohup).
+#   2. Frena lo que esté corriendo: el servicio systemd (STT_SERVICE, default
+#      "rai26-stt") si existe, y cualquier `main.py` suelto (tmux, nohup).
 #   3. Corre `python linux/main.py` en primer plano con ORCHESTRATOR_IP pisado
 #      por variable de entorno (main.py hace load_dotenv() sin override, así
 #      que el .env no se toca).
@@ -26,7 +26,7 @@ ROOT="$(dirname "$HERE")"
 if [ -z "${STT_SERVICE:-}" ] && [ -f "$HERE/.env" ]; then
     STT_SERVICE="$(grep -E '^STT_SERVICE=' "$HERE/.env" | tail -n1 | cut -d= -f2- | tr -d '"' | tr -d "'" || true)"
 fi
-SERVICE="${STT_SERVICE:-stt}"
+SERVICE="${STT_SERVICE:-rai26-stt}"
 PORT="${ORCHESTRATOR_PORT:-9000}"
 CTRL_PORT="${CTRL_PORT:-9001}"
 
@@ -68,6 +68,18 @@ stop_running() {
         die "el puerto ${CTRL_PORT} sigue ocupado por el proceso de arriba. Si es un servicio," \
             "frenalo y/o poné su nombre: STT_SERVICE=<nombre> $0 ... (o en linux/.env)"
     fi
+    # Mismo chequeo para el mic: si alguien lo tiene abierto, PortAudio no
+    # lista ningún dispositivo y main.py muere con "Error querying device -1".
+    local dev holders
+    for dev in /dev/snd/pcmC*D*c; do
+        [ -e "$dev" ] || continue
+        holders="$(sudo fuser -v "$dev" 2>&1 | tail -n +2 || true)"
+        if [ -n "$holders" ]; then
+            printf '%s\n' "$holders" >&2
+            die "el mic ($dev) sigue ocupado por el proceso de arriba; matalo (kill -9 <pid>)" \
+                "o desenchufá y enchufá el mic USB"
+        fi
+    done
 }
 
 restore() {

@@ -236,6 +236,12 @@ recién ahí las frases van a Groq.
 - Mientras suena el beep el mic se ignora (~230 ms) para no transcribirse el
   propio beep. Si no hay parlante, `WAKE_SOUND=none` (o se desactiva solo al
   fallar) y el wake funciona igual.
+- Además del beep local, cada cambio despierto/dormido se le avisa al
+  orquestador (`@@event:awake` / `@@event:asleep` por el mismo socket del
+  texto) y **él** hace sonar un chime por el parlante del robot: agudo al
+  empezar a escuchar, grave cuando vence la ventana (`WAKE_WINDOW_S`) y se
+  duerme. `WAKE_EVENTS_ENABLED=false` lo apaga; el volumen se fija allá
+  (`TTS_CHIME_VOLUME` en el `.env` del orquestador).
 - El texto que llega a Groq después del beep pasa igual por el filtro de
   texto de abajo: si Whisper escribe "rai vení" se recorta a "vení".
 
@@ -280,6 +286,7 @@ WAKE_MODE=audio           # audio | text
 WAKE_PHRASES=oye rai,oye ray,oye rey   # agregá "hola rai", "che rai"...
 WAKE_SOUND=beep           # beep | none | /ruta/ding.wav
 AUDIO_OUTPUT_DEVICE=      # parlante para el beep (índice de sounddevice)
+WAKE_EVENTS_ENABLED=true  # chime remoto (parlante del orquestador) al despertar/dormirse
 WAKE_WINDOW_S=25
 ATTENTION_LEVEL_RATIO=0.6 # 0.8 = más cerrado sobre quien lo llamó; 0 = off
 ```
@@ -405,7 +412,7 @@ Windows Firewall va a preguntar la primera vez que Python escuche: permitir.
 ./linux/dev_orchestrator.sh mi-pc          # hostname de Tailscale, o la IP 100.x.y.z
 ```
 
-Frena el servicio systemd (`STT_SERVICE`, default `stt`) o cualquier
+Frena el servicio systemd (`STT_SERVICE`, default `rai26-stt`) o cualquier
 `main.py` suelto, y corre `main.py` en primer plano con `ORCHESTRATOR_IP`
 pisado por variable de entorno (el `.env` queda intacto). **Ctrl+C** vuelve
 a levantar el servicio si estaba corriendo. Para forzar la vuelta a la Jetson:

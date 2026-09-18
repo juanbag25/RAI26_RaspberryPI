@@ -140,6 +140,14 @@ WAKE_QUEUE_S = _env_float("WAKE_QUEUE_S", 3.0)
 WAKE_MODEL_NAME = _env_str("WAKE_MODEL_NAME", "vosk-model-small-es-0.42")
 # Sonido al despertar: "beep" (generado), "none", o ruta a un .wav 16-bit.
 WAKE_SOUND = _env_str("WAKE_SOUND", "beep")
+# Avisar al orquestador cada cambio despierto/dormido (mismo socket que el
+# texto, con el prefijo ORCH_EVENT_PREFIX): él hace sonar un chime por SU
+# parlante — agudo al despertar, grave al vencerse la ventana. Útil cuando la
+# Pi no tiene parlante (WAKE_SOUND=none) y el que se oye es el del robot.
+WAKE_EVENTS_ENABLED = _env_bool("WAKE_EVENTS_ENABLED", True)
+# Debe coincidir con EVENT_PREFIX en orchestrator.py. Whisper nunca devuelve
+# texto que empiece así, por eso se puede compartir el socket del texto.
+ORCH_EVENT_PREFIX = "@@event:"
 WAKE_SOUND_VOLUME = _env_float("WAKE_SOUND_VOLUME", 0.4)
 # Parlante para el beep (índice de sounddevice; vacío = default del sistema).
 _out = _env_str("AUDIO_OUTPUT_DEVICE", "")
