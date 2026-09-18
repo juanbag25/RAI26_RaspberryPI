@@ -21,7 +21,7 @@ import wave
 import numpy as np
 
 from config import WAKE_SOUND, WAKE_SOUND_DEVICE, WAKE_SOUND_VOLUME
-from log import log
+from log import dim, warn
 
 
 def _tone(rate: int, freq: float, ms: int, volume: float) -> np.ndarray:
@@ -65,7 +65,7 @@ class WakeSound:
         self._duration = 0.0
         self._device = WAKE_SOUND_DEVICE
         if not self._enabled:
-            log("[SOUND] sonido de wake desactivado (WAKE_SOUND=none)")
+            dim("SOUND", "beep desactivado (WAKE_SOUND=none)")
             return
         try:
             import sounddevice as sd
@@ -78,13 +78,12 @@ class WakeSound:
                 path = os.path.expanduser(WAKE_SOUND)
                 self._data, self._rate = _load_wav(path, WAKE_SOUND_VOLUME)
             self._duration = len(self._data) / self._rate
-            log(f"[SOUND] wake sound={WAKE_SOUND!r} ({self._duration * 1000:.0f} ms, "
-                f"{self._rate} Hz) por device="
+            dim("SOUND", f"beep={WAKE_SOUND} ({self._duration * 1000:.0f} ms) por device="
                 f"{'default' if self._device is None else self._device}")
         except Exception as exc:  # noqa: BLE001
             self._enabled = False
-            log(f"[SOUND] sin salida de audio, sigo sin sonido ({type(exc).__name__}: {exc}). "
-                f"Revisá AUDIO_OUTPUT_DEVICE o poné WAKE_SOUND=none", err=True)
+            warn("SOUND", f"sin salida de audio, sigo sin beep ({type(exc).__name__}: {exc}). "
+                 f"Revisá AUDIO_OUTPUT_DEVICE o poné WAKE_SOUND=none")
 
     @property
     def enabled(self) -> bool:
@@ -99,8 +98,8 @@ class WakeSound:
             self._playing_until = time.monotonic() + self._duration + 0.08
         except Exception as exc:  # noqa: BLE001
             self._enabled = False
-            log(f"[SOUND] falló la reproducción, desactivo el sonido "
-                f"({type(exc).__name__}: {exc})", err=True)
+            warn("SOUND", f"falló la reproducción, desactivo el beep "
+                 f"({type(exc).__name__}: {exc})")
 
     def is_playing(self) -> bool:
         return time.monotonic() < self._playing_until

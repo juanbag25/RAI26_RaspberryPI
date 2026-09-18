@@ -20,7 +20,7 @@ import time
 from typing import Callable
 
 from config import MUTE_TIMEOUT_S
-from log import log
+from log import err, info, warn
 
 _MAX_MESSAGE_BYTES = 1024
 
@@ -40,7 +40,7 @@ class SpeakMute:
             return False
         if time.monotonic() > self._deadline:
             self._muted.clear()
-            log("[CTRL] SPEAK_END perdido: desmuteo por timeout")
+            warn("CTRL", "SPEAK_END perdido: desmuteo por timeout")
             self._notify_speak_end()
             return False
         return True
@@ -51,19 +51,19 @@ class SpeakMute:
         try:
             self._on_speak_end()
         except Exception as exc:  # noqa: BLE001 - nunca matar el loop de mic
-            log(f"[CTRL ERROR] on_speak_end: {exc}", err=True)
+            err("CTRL", f"on_speak_end: {exc}")
 
     def handle(self, message: str) -> None:
         if message == "SPEAK_START":
             self._deadline = time.monotonic() + self._timeout
             self._muted.set()
-            log("[CTRL] SPEAK_START: robot hablando, mic muteado")
+            info("CTRL", "robot habla: mic MUTEADO")
         elif message == "SPEAK_END":
             self._muted.clear()
-            log("[CTRL] SPEAK_END: robot terminó, mic activo")
+            info("CTRL", "robot terminó: mic activo")
             self._notify_speak_end()
         else:
-            log(f"[CTRL] mensaje desconocido: {message!r}")
+            warn("CTRL", f"mensaje desconocido: {message!r}")
 
 
 def _recv_exact(conn: socket.socket, n: int) -> bytes | None:
@@ -87,20 +87,20 @@ def _serve_forever(port: int, mute: SpeakMute) -> None:
         with conn:
             header = _recv_exact(conn, 4)
             if header is None:
-                log(f"[CTRL] conexión de {addr[0]} cerrada sin header")
+                warn("CTRL", f"conexión de {addr[0]} cerrada sin header")
                 continue
             (length,) = struct.unpack("!I", header)
             if length == 0 or length > _MAX_MESSAGE_BYTES:
-                log(f"[CTRL] largo inválido {length} desde {addr[0]}, ignorado")
+                warn("CTRL", f"largo inválido {length} desde {addr[0]}, ignorado")
                 continue
             payload = _recv_exact(conn, length)
             if payload is None:
-                log(f"[CTRL] conexión de {addr[0]} cortada a mitad del payload")
+                warn("CTRL", f"conexión de {addr[0]} cortada a mitad del payload")
                 continue
             try:
                 mute.handle(payload.decode("utf-8", errors="replace"))
             except Exception as exc:  # noqa: BLE001 - nunca matar el server
-                log(f"[CTRL ERROR] {exc}", err=True)
+                err("CTRL", str(exc))
 
 
 def start_in_background(port: int, mute: SpeakMute) -> threading.Thread:

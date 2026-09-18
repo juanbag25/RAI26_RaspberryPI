@@ -2,6 +2,8 @@ import os
 
 from dotenv import load_dotenv
 
+from log import warn
+
 # Los knobs de tuning se pueden pisar desde linux/.env sin tocar código (útil
 # para calibrar en la Pi por SSH). main.py ya llama load_dotenv(); acá se
 # repite para que mic_level.py y cualquier script suelto vean lo mismo.
@@ -13,7 +15,7 @@ def _env_float(name: str, default: float) -> float:
     try:
         return float(raw) if raw else default
     except ValueError:
-        print(f"[CONFIG] {name}={raw!r} no es un número: uso {default}")
+        warn("CONFIG", f"{name}={raw!r} no es un número: uso {default}")
         return default
 
 

@@ -32,7 +32,7 @@ import threading
 import time
 import unicodedata
 
-from log import log
+from log import dim, drop, fmt, ok
 from config import (
     ATTENTION_FOLLOW_ALPHA,
     ATTENTION_LEVEL_RATIO,
@@ -101,8 +101,8 @@ class WakeWord:
         utterance en curso, 0 si el VAD todavía no abrió una).
         """
         self._wake(level)
-        log(f"[WAKE] despierto por audio (foco={self.focus_level():.4f}, "
-            f"mínimo={self.min_level():.4f}, ventana {WAKE_WINDOW_S:.0f}s)")
+        ok("WAKE", f"DESPIERTO por audio, {WAKE_WINDOW_S:.0f}s "
+           + fmt(foco=self.focus_level(), minimo=self.min_level()))
 
     def sleep(self) -> None:
         with self._lock:
@@ -129,8 +129,8 @@ class WakeWord:
         minimum = self.min_level()
         if level >= minimum:
             return True
-        log(f"[WAKE] atención: ignorado, más flojo que quien me llamó "
-            f"(nivel={level:.4f} < {minimum:.4f}, foco={self.focus_level():.4f})")
+        drop("WAKE", "más flojo que quien me llamó", nivel=level, minimo=minimum,
+             foco=self.focus_level())
         return False
 
     # -- filtro ---------------------------------------------------------------
@@ -184,10 +184,10 @@ class WakeWord:
             if self.is_awake():
                 self._wake()  # sigue la conversación: renueva la ventana
                 self._follow(level)
-                log(f"[WAKE] ya despierto, sigue la charla (ventana +{WAKE_WINDOW_S:.0f}s, "
-                    f"foco={self.focus_level():.4f})")
+                dim("WAKE", f"sigue la charla, ventana +{WAKE_WINDOW_S:.0f}s "
+                    + fmt(foco=self.focus_level()))
                 return text
-            log(f"[WAKE] dormido, ignorado: {text}")
+            drop("WAKE", "dormido y no dijo mi nombre", texto=f"«{text}»")
             return None
 
         # Despierta Y se engancha al nivel de voz de quien lo llamó.
@@ -196,8 +196,9 @@ class WakeWord:
         # al LLM le llega la instrucción sola.
         rest = " ".join(text.split()[owners[index] + 1:]).lstrip(" ,.;:-—").strip()
         if not rest:
-            log(f"[WAKE] despierto por «{text}» (sin instrucción, mando ack={WAKE_ACK_TEXT!r})")
+            ok("WAKE", f"DESPIERTO por «{text}», sin instrucción"
+               + (f", mando ack «{WAKE_ACK_TEXT}»" if WAKE_ACK_TEXT else ""))
             return WAKE_ACK_TEXT or None
-        log(f"[WAKE] despierto por «{text}» (foco={self.focus_level():.4f}, "
-            f"mínimo={self.min_level():.4f})")
+        ok("WAKE", f"DESPIERTO por «{text}» "
+           + fmt(foco=self.focus_level(), minimo=self.min_level()))
         return rest

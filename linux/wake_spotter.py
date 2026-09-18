@@ -48,7 +48,7 @@ from config import (
     WAKE_PHRASES,
     WAKE_QUEUE_S,
 )
-from log import DEBUG, dbg, log
+from log import DEBUG, dbg, dim, err, info, ok
 from wake_word import normalize
 
 
@@ -82,9 +82,8 @@ class WakeSpotter:
         t0 = time.monotonic()
         self._model = Model(WAKE_MODEL_PATH)
         self._rec = KaldiRecognizer(self._model, SAMPLE_RATE, grammar)
-        log(f"[SPOT] Vosk cargado en {time.monotonic() - t0:.1f}s: "
-            f"{os.path.basename(WAKE_MODEL_PATH)}, frases={list(self._phrases)}, "
-            f"parcial={'sí' if WAKE_ON_PARTIAL else 'no'}, cooldown={WAKE_COOLDOWN_S}s")
+        info("SPOT", f"Vosk listo ({time.monotonic() - t0:.1f}s): escucha "
+             + ", ".join(f"«{p}»" for p in self._phrases))
 
         frames_per_s = 1000 // FRAME_MS
         self._queue: "queue.Queue[bytes | None]" = queue.Queue(
@@ -147,7 +146,7 @@ class WakeSpotter:
                     text = json.loads(self._rec.PartialResult()).get("partial", "")
                     self._check(text, final=False)
             except Exception as exc:  # noqa: BLE001 - nunca matar el spotter
-                log(f"[SPOT ERROR] {type(exc).__name__}: {exc}", err=True)
+                err("SPOT", f"{type(exc).__name__}: {exc}")
 
     def _matches(self, text: str) -> str | None:
         n = normalize(text)
@@ -162,21 +161,21 @@ class WakeSpotter:
         with self._lock:
             if text != self._stats.last_text:
                 self._stats.last_text = text
-                dbg(f"[SPOT] {'final' if final else 'parcial'}: {text!r}")
+                dbg(f"{'final' if final else 'parcial'}: «{text}»", "SPOT")
         phrase = self._matches(text)
         if phrase is None:
             return
         # Vaciar el decoder: lo que sigue es la instrucción, no otra vez el nombre.
         self._rec.Reset()
         if self._frames_done < self._cooldown_until_frame:
-            dbg(f"[SPOT] {phrase!r} en cooldown, ignorado")
+            dbg(f"«{phrase}» en cooldown, ignorado", "SPOT")
             return
         self._cooldown_until_frame = self._frames_done + self._cooldown_frames
         with self._lock:
             self._stats.detections += 1
         self._detected_text = text
         self._detected.set()
-        log(f"[SPOT] wake detectado ({'final' if final else 'parcial'}): «{text}»")
+        ok("SPOT", f"oí «{text}»")
 
 
 def _live() -> None:
@@ -187,19 +186,19 @@ def _live() -> None:
     device_env = os.getenv("AUDIO_INPUT_DEVICE", "").strip()
     spotter = WakeSpotter()
     sound = WakeSound()
-    log("Hablale al mic. Decí una de las frases de wake; Ctrl+C para salir.")
+    info("SPOT", "Hablale al mic. Decí una de las frases de wake; Ctrl+C para salir.")
     last_hb = time.monotonic()
     for frame in LinuxAudioCapture(device_id=int(device_env) if device_env else None).frames():
         spotter.feed(frame)
         text = spotter.take_detection()
         if text:
             sound.play()
-            log(f">>> DESPIERTO por «{text}»")
+            ok("WAKE", f"DESPIERTO por «{text}»")
         if time.monotonic() - last_hb >= 5:
             last_hb = time.monotonic()
             st = spotter.pop_stats()
-            log(f"[HB] frames={st.frames} descartados={st.dropped} cola={spotter.queue_size()} "
-                f"último_texto={st.last_text!r}")
+            dim("HB", f"frames={st.frames} descartados={st.dropped} cola={spotter.queue_size()} "
+                f"oyó=«{st.last_text}»")
 
 
 if __name__ == "__main__":

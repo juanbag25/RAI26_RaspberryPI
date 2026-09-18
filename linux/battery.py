@@ -17,7 +17,7 @@ from __future__ import annotations
 import os
 import subprocess
 
-from log import log
+from log import dim, warn
 
 # Cada cuánto re-loguear la alimentación mientras corre (0 = sólo al arrancar).
 POWER_LOG_S = float(os.getenv("POWER_LOG_S", "300") or 0)
@@ -44,8 +44,8 @@ def _pi_power_lines() -> list[str]:
                     v = float(raw.split("=")[1].rstrip("V"))
                 except ValueError:
                     break
-                warn = "  <-- BAJA (fuente/cable flojo, riesgo de reinicio)" if v < 4.8 else ""
-                lines.append(f"entrada 5V real: {v:.2f} V{warn}")
+                low = "  <-- BAJA (fuente/cable flojo, riesgo de reinicio)" if v < 4.8 else ""
+                lines.append(f"entrada 5V real: {v:.2f} V{low}")
                 break
 
     thr = _vcgencmd("get_throttled")
@@ -75,9 +75,12 @@ def report_power() -> None:
     """Loguea lo que la Pi sabe de su alimentación (una línea por dato)."""
     lines = _pi_power_lines()
     if not lines:
-        log("[POWER] sin datos de alimentación (¿vcgencmd no disponible?)")
+        dim("POWER", "sin datos de alimentación (¿vcgencmd no disponible?)")
     for line in lines:
-        log(f"[POWER] Pi: {line}")
+        if "<--" in line or "UNDERVOLTAGE" in line or "throttled ahora" in line:
+            warn("POWER", line)
+        else:
+            dim("POWER", line)
 
 
 if __name__ == "__main__":

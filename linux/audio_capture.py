@@ -10,7 +10,7 @@ os.environ.setdefault("PA_ALSA_PLUGHW", "1")
 import sounddevice as sd
 
 from config import FRAME_MS, SAMPLE_RATE
-from log import log
+from log import dbg, err, info, warn
 
 
 class LinuxAudioCapture:
@@ -23,8 +23,8 @@ class LinuxAudioCapture:
         print(sd.query_devices())
 
     def frames(self) -> Iterator[bytes]:
-        log(f"[AUDIO] abriendo stream: device={self._device_id} "
-            f"{SAMPLE_RATE} Hz mono int16, bloque={self._blocksize} samples ({FRAME_MS} ms)")
+        dbg(f"abriendo stream: device={self._device_id} {SAMPLE_RATE} Hz mono int16, "
+            f"bloque={self._blocksize} samples ({FRAME_MS} ms)", "AUDIO")
         try:
             stream = sd.RawInputStream(
                 samplerate=SAMPLE_RATE,
@@ -36,13 +36,15 @@ class LinuxAudioCapture:
         except sd.PortAudioError as exc:
             # "Error querying device -1" = PortAudio no ve NINGUNA entrada:
             # mic USB desconectado o no enumerado por ALSA.
-            log(f"[AUDIO ERROR] no pude abrir el mic (device={self._device_id}): {exc}", err=True)
-            log("[AUDIO ERROR] ¿mic USB conectado? Revisá `arecord -l` y el listado de "
+            err("AUDIO", f"no pude abrir el mic (device={self._device_id}): {exc}")
+            err("AUDIO", "¿mic USB conectado? Revisá `arecord -l` y el listado de "
                 "arriba; si aparece pero no es el default, poné su índice en "
-                "AUDIO_INPUT_DEVICE (.env)", err=True)
+                "AUDIO_INPUT_DEVICE (.env)")
             raise
         with stream:
-            log(f"[AUDIO] stream abierto (latencia={stream.latency * 1000:.0f} ms)")
+            info("AUDIO", f"mic abierto: device="
+                 f"{'default' if self._device_id is None else self._device_id}, "
+                 f"{SAMPLE_RATE} Hz, latencia {stream.latency * 1000:.0f} ms")
             try:
                 while True:
                     data, overflowed = stream.read(self._blocksize)
@@ -51,7 +53,7 @@ class LinuxAudioCapture:
                         # (algo bloqueó este loop demasiado); frames de audio
                         # se perdieron/pisaron, lo que puede desincronizar al
                         # VAD del tiempo real.
-                        log("[AUDIO WARN] input overflow: se perdieron frames de mic")
+                        warn("AUDIO", "input overflow: se perdieron frames del mic")
                     yield bytes(data)
             except KeyboardInterrupt:
                 return

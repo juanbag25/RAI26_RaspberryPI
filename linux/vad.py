@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import webrtcvad
 
-from log import dbg, log
+from log import dbg, dim, drop, fmt, ok
 
 from config import (
     FRAME_MS,
@@ -79,10 +79,8 @@ class VoiceActivityDetector:
         self.last_level = 0.0
         self._stats = VadStats()
         self._reset_utterance()
-        log(f"[VAD] init: aggressiveness={VAD_AGGRESSIVENESS} frame={FRAME_MS}ms "
-            f"silencio_cierre={SILENCE_MS}ms min_voz={MIN_UTTERANCE_MS}ms "
-            f"onset={ONSET_SPEECH_FRAMES} frames | RMS_THRESHOLD={RMS_THRESHOLD} "
-            f"NEAR_RMS_THRESHOLD={NEAR_RMS_THRESHOLD} NEAR_SNR_RATIO={NEAR_SNR_RATIO}")
+        dim("VAD", f"filtro: abre>={RMS_THRESHOLD} cerca>={NEAR_RMS_THRESHOLD} "
+            f"snr x{NEAR_SNR_RATIO} min_voz={MIN_UTTERANCE_MS}ms silencio={SILENCE_MS}ms")
 
     def pop_stats(self) -> VadStats:
         """Devuelve y reinicia los contadores de la ventana."""
@@ -107,8 +105,7 @@ class VoiceActivityDetector:
         """
         if not self._in_speech:
             return False
-        log(f"[VAD] utterance descartada: {reason} "
-            f"({self._speech_frame_count * FRAME_MS} ms de voz se pierden)")
+        drop("VAD", reason, voz_ms=self._speech_frame_count * FRAME_MS)
         self._stats.rejected += 1
         self._reset_utterance()
         return True
@@ -128,6 +125,10 @@ class VoiceActivityDetector:
     def open_threshold(self) -> float:
         """Umbral vivo para abrir: el absoluto o el relativo al ruido, el mayor."""
         return max(RMS_THRESHOLD, self._noise_floor * NEAR_SNR_RATIO)
+
+    def near_threshold(self) -> float:
+        """Umbral vivo de cercanía (segunda etapa, sobre la utterance entera)."""
+        return max(NEAR_RMS_THRESHOLD, self._noise_floor * NEAR_SNR_RATIO)
 
     def process_frame(self, frame_bytes: bytes) -> tuple[bool, np.ndarray | None]:
         is_speech = self._vad.is_speech(frame_bytes, SAMPLE_RATE)
@@ -156,14 +157,12 @@ class VoiceActivityDetector:
                     self._speech_frame_count = self._onset_count
                     self._speech_levels = [rms]
                     st.opened += 1
-                    log(f"[VAD] utterance ABIERTA (rms={rms:.4f} >= "
-                        f"umbral={self.open_threshold():.4f}, ruido={self._noise_floor:.4f})")
+                    dim("VAD", "▶ voz " + fmt(rms=rms, abre=self.open_threshold()))
             else:
                 if is_speech:
                     # Voz según webrtcvad pero floja: no abre. Si esto aparece
                     # todo el tiempo mientras le hablás, el umbral está alto.
-                    dbg(f"[VAD] voz floja no abre: rms={rms:.4f} < "
-                        f"umbral={self.open_threshold():.4f}")
+                    dbg("voz floja, no abre " + fmt(rms=rms, abre=self.open_threshold()), "VAD")
                 self._onset_count = 0
                 # Todo lo que no abrió (silencio, ventilador, voces lejanas)
                 # es, por definición, el fondo contra el que hay que destacarse.
@@ -184,10 +183,8 @@ class VoiceActivityDetector:
             if accepted:
                 st.accepted += 1
                 self.last_level = self._utterance_level()
-                log(f"[VAD] utterance CERRADA y aceptada: "
-                    f"{self._speech_frame_count * FRAME_MS} ms de voz, "
-                    f"{len(self._utterance) * FRAME_MS} ms totales, "
-                    f"nivel={self._utterance_level():.4f} -> a transcribir")
+                ok("VAD", f"voz {self._speech_frame_count * FRAME_MS} ms "
+                   + fmt(nivel=self.last_level, ruido=self._noise_floor))
             else:
                 st.rejected += 1
             self._reset_utterance()
@@ -197,15 +194,15 @@ class VoiceActivityDetector:
     def _utterance_accepted(self) -> bool:
         """Segunda etapa del filtro: ¿fue voz real y de cerca?"""
         if self._speech_frame_count < self._min_speech_frames:
-            log(f"[VAD] descartada: muy corta "
-                f"({self._speech_frame_count * FRAME_MS} ms de voz, mínimo {MIN_UTTERANCE_MS})")
+            drop("VAD", "muy corta", voz_ms=self._speech_frame_count * FRAME_MS,
+                 minimo_ms=MIN_UTTERANCE_MS)
             return False
 
         level = self._utterance_level()
-        near_threshold = max(NEAR_RMS_THRESHOLD, self._noise_floor * NEAR_SNR_RATIO)
+        near_threshold = self.near_threshold()
         if level < near_threshold:
-            log(f"[VAD] descartada: lejana/floja (nivel={level:.4f} < "
-                f"{near_threshold:.4f}, ruido={self._noise_floor:.4f})")
+            drop("VAD", "lejana/floja", nivel=level, umbral=near_threshold,
+                 ruido=self._noise_floor)
             return False
         return True
 

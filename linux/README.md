@@ -174,7 +174,7 @@ topeado en `NOISE_FLOOR_MAX` para que un ruido fuerte sostenido no deje sordo al
 robot. Cada descarte se loguea con el nivel medido:
 
 ```
-[VAD] descartada: lejana/floja (nivel=0.0263 < 0.0550, ruido=0.0036)
+VAD   ✗ DESCARTADO lejana/floja  nivel=0.0263 umbral=0.0550 ruido=0.0036
 ```
 
 ### Calibración
@@ -216,15 +216,17 @@ recién ahí las frases van a Groq.
 
 ```
 >>> ¿viste el partido de ayer?
-[MAIN] dormido: utterance descartada sin transcribir (nivel=0.0812; decí «oye rai»)
+VAD   ✓ voz 1200 ms nivel=0.0812 ruido=0.0041
+WAKE  ✗ DESCARTADO dormido: no transcribo hasta oír «oye rai»  nivel=0.0812
 >>> oye rai
-[SPOT] wake detectado (parcial): «oye ray»
-[WAKE] despierto por audio (foco=0.1547, mínimo=0.0928, ventana 25s)
-[VAD] utterance descartada: wake por audio (780 ms de voz se pierden)   <- el "oye rai" no se transcribe
+SPOT  ✓ oí «oye ray»
+WAKE  ✓ DESPIERTO por audio, 25s foco=0.1547 minimo=0.0928
+VAD   ✗ DESCARTADO era el «oye rai», no hace falta transcribirlo  voz_ms=780
    *beep*
 >>> vení para acá
-[STT] 0.61s >>> Vení para acá.
-[NET] enviado al orquestador ...
+VAD   ✓ voz 900 ms nivel=0.1490 ruido=0.0041
+STT   · «Vení para acá.» (0.61s)
+NET   ✓ enviado «Vení para acá.» (0.01s)
 ```
 
 - La frase de wake tiene que sonar *parecido*, no exacto: Vosk sólo puede
@@ -253,9 +255,10 @@ y gasta Groq aunque duerma; es el fallback si Vosk no arranca.
 
 ```
 >>> ¿viste el partido de ayer?
-[WAKE] dormido, ignorado: ¿viste el partido de ayer?
+WAKE  ✗ DESCARTADO dormido y no dijo mi nombre  texto=«¿viste el partido de ayer?»
 >>> Rai, vení para acá
-[WAKE] despierto por «Rai, vení para acá»     -> se manda "vení para acá"
+WAKE  ✓ DESPIERTO por «Rai, vení para acá» foco=0.0790 minimo=0.0474
+NET   ✓ enviado «vení para acá» (0.01s)
 ```
 
 - El match ignora mayúsculas, acentos y puntuación, acepta las variantes con las
@@ -272,7 +275,7 @@ y gasta Groq aunque duerma; es el fallback si Vosk no arranca.
   `nivel × ATTENTION_LEVEL_RATIO` (default 0.6) — se chequea **antes** de
   transcribir, así que el fondo de la sala ni gasta Whisper. La referencia
   sigue a la persona (EMA por frase) y decir "rai" de nuevo la re-engancha a
-  quien lo dijo. Log: `[WAKE] atención: ignorado, más flojo que quien me llamó`.
+  quien lo dijo. Log: `WAKE ✗ DESCARTADO más flojo que quien me llamó`.
 - Después queda despierto `WAKE_WINDOW_S` segundos para seguir la conversación
   sin repetir el nombre. Cada frase aceptada renueva la ventana, y también la
   renueva el `SPEAK_END` del orquestador (acaba de contestar: lo natural es que
@@ -303,42 +306,86 @@ ver el root README.
 
 ## Logs y diagnóstico
 
-Todas las líneas salen con timestamp (`[HH:MM:SS.mmm]`) y sin buffer, así que
-sirven igual por SSH, `tmux` o redirigidas a un archivo. Cada etapa del
-pipeline deja rastro:
+Cada línea es un evento: hora, **etapa** (siempre del mismo color) y un símbolo
+que dice qué pasó. Sin buffer, así que sirve igual por SSH, `tmux` o redirigido
+a un archivo.
 
 ```
-[AUDIO] stream abierto (latencia=32 ms)
-[AUDIO] primer frame recibido del mic: el stream funciona
-[VAD] utterance ABIERTA (rms=0.0812 >= umbral=0.0200, ruido=0.0041)
-[VAD] utterance CERRADA y aceptada: 1230 ms de voz, 2130 ms totales, nivel=0.0790 -> a transcribir
-[MAIN] utterance encolada para STT (cola=1)
-[STT] transcribiendo 2.1s de audio...
-[STT] 0.84s >>> Rai, vení para acá
-[WAKE] despierto por «Rai, vení para acá»
-[NET] enviado al orquestador 192.168.1.50:9000 (13 B en 0.01s): «vení para acá»
+HH:MM:SS.mmm ETAPA  símbolo mensaje
 ```
 
-Además, cada `LOG_HEARTBEAT_S` segundos (default 10) sale un resumen `[HB]`:
+| Símbolo | Significa |
+|---|---|
+| `✓` verde | la frase pasó esta etapa (o algo se hizo bien) |
+| `✗ DESCARTADO <razón>` amarillo | la frase **no sigue**; al lado, sólo los valores que explican la razón |
+| `!` amarillo | aviso |
+| `✖` rojo | error |
+| `·` | info |
+| gris | contexto (heartbeat, estado) |
+
+Etapas, en el orden en que una frase las recorre: `AUDIO` (mic) → `SPOT`
+(spotter "oye rai") → `VAD` (voz + cercanía) → `WAKE` (despierto/dormido y
+foco) → `STT` (Groq) → `NET` (orquestador). `CTRL` son los SPEAK_START/END del
+orquestador y `HB` el heartbeat.
+
+Una frase que llega hasta el robot se ve así:
 
 ```
-[HB] frames=333 muteados=0 voz=41 voz>umbral=38 | rms max=0.0912 media=0.0060 ruido=0.0044 umbral_abrir=0.0200 cerca=0.055 | utt abiertas=1 ok=1 desc=0 en_utt=no | cola_stt=0 stt=1 vacías=0 enviadas=1 fallidas=0 | mute=no wake=despierto
+AUDIO ✓ primer frame del mic: escuchando
+SPOT  ✓ oí «oye rai»
+WAKE  ✓ DESPIERTO por audio, 25s foco=0.0812 minimo=0.0487
+VAD   ▶ voz rms=0.0812 abre=0.0200
+VAD   ✓ voz 1230 ms nivel=0.0790 ruido=0.0041
+STT   · «vení para acá» (0.84s)
+WAKE  sigue la charla, ventana +25s foco=0.0790
+NET   ✓ enviado «vení para acá» (0.01s)
 ```
 
-Cómo leerlo cuando "se queda escuchando y no pasa nada":
+### Por qué NO escuchó
 
-| Síntoma en `[HB]` | Significa | Qué tocar |
+Todo descarte sale como `✗ DESCARTADO <razón>` en la etapa que lo decidió, con
+los números que lo explican. Razones posibles:
+
+| Línea | Qué pasó | Qué tocar |
 |---|---|---|
-| `frames=0` / `<-- SIN AUDIO DEL MIC` | PortAudio no entrega audio | mic equivocado (`AUDIO_INPUT_DEVICE`), cable, `arecord -l` |
-| `rms max` ≈ 0.000x aunque hables | el mic está pero casi mudo | subir ganancia (`alsamixer`), otro device |
-| `voz=0` aunque hables | webrtcvad no ve voz | mic/sample rate raro; probar `VAD_AGGRESSIVENESS` más bajo |
-| `voz>0` pero `voz>umbral=0` | la voz llega floja | bajar `RMS_THRESHOLD` / subir ganancia; `LOG_DEBUG=1` muestra cada frame |
-| `abiertas>0` pero `ok=0` | se abren y se descartan | mirar los `[VAD] descartada:` (corta → `MIN_UTTERANCE_MS`; lejana → `NEAR_RMS_THRESHOLD`) |
-| `ok>0` pero `stt` no crece | el hilo de STT está trabado | mirar `[STT ERROR]` (Groq / API key / red) |
-| `vacías` crece | Groq devuelve "" | `[STT ERROR]` arriba, o audio inaudible |
-| `[WAKE] dormido, ignorado` | transcribió pero no dijiste "rai" | `WAKE_WORD_ENABLED=false` para probar |
-| `fallidas` crece | no llega al orquestador | `[NET ERROR]`: IP/puerto/firewall |
-| `mute=SÍ` todo el tiempo | se perdió un `SPEAK_END` | expira solo a los `MUTE_TIMEOUT_S`; revisar el orquestador |
+| `VAD ✗ DESCARTADO muy corta  voz_ms=150 minimo_ms=400` | un golpe, una sílaba | `MIN_UTTERANCE_MS` |
+| `VAD ✗ DESCARTADO lejana/floja  nivel=… umbral=… ruido=…` | voz de fondo, no de cerca | `NEAR_RMS_THRESHOLD` por debajo del `nivel` medido (o hablar más cerca) |
+| `VAD ✗ DESCARTADO el robot empezó a hablar` | llegó `SPEAK_START` a mitad de frase | nada: es lo esperado |
+| `VAD ✗ DESCARTADO era el «oye rai»…` | la frase de wake no se transcribe | nada |
+| `WAKE ✗ DESCARTADO dormido: no transcribo hasta oír «oye rai»` | modo audio, nadie lo llamó | decir la frase de wake; ver `spotter oyó` en `HB` |
+| `WAKE ✗ DESCARTADO más flojo que quien me llamó  nivel=… minimo=… foco=…` | otra persona más lejos que quien dijo "rai" | `ATTENTION_LEVEL_RATIO` |
+| `WAKE ✗ DESCARTADO dormido y no dijo mi nombre  texto=«…»` | modo texto: transcribió pero no empezó con "rai" | `WAKE_WORDS` si Whisper escribió el nombre raro |
+| `STT ✗ DESCARTADO Groq no devolvió texto` | error de Groq (línea `✖` arriba) o audio inaudible | API key / red / ganancia |
+| `STT ✗ DESCARTADO eco del prompt de Whisper` | Whisper repitió `STT_PROMPT`: ruido | nada |
+| `NET ✖ …` | transcribió bien pero no llegó al orquestador | IP / puerto / firewall |
+
+`LOG_DEBUG=1` agrega lo que por defecto no sale: cada frame de voz que no llega
+al umbral de apertura, los parciales de Vosk, el detalle de cada envío TCP.
+
+### Heartbeat
+
+Cada `LOG_HEARTBEAT_S` segundos (default 10) sale una línea `HB` en gris con lo
+que vio el mic en esa ventana; sale en amarillo (`!`) si detecta un problema:
+
+```
+HB    voz 1.2s, fuerte 0.9s · ruido=0.0044 abre=0.0200 cerca=0.0550 · utt ok=1 desc=0 · total stt=1 env=1 · despierto foco=0.0790 minimo=0.0474 · spotter oyó «oye rai»
+```
+
+| Síntoma en `HB` | Significa | Qué tocar |
+|---|---|---|
+| `SIN AUDIO DEL MIC` | PortAudio no entrega audio | mic equivocado (`AUDIO_INPUT_DEVICE`), cable, `arecord -l` |
+| `pocos frames` | el loop de captura se traba | mirar `AUDIO ! input overflow`, CPU |
+| `sin voz (rms max 0.000x)` aunque hables | el mic está pero casi mudo | subir ganancia (`alsamixer`), otro device |
+| `voz 1.2s, fuerte 0.0s` | webrtcvad ve voz pero no llega a `abre` | bajar `RMS_THRESHOLD` / subir ganancia; `LOG_DEBUG=1` muestra cada frame |
+| `utt ok=0 desc=N` | se abren y se descartan | mirar los `✗ DESCARTADO` de arriba |
+| `stt` no crece con `ok>0` | el hilo de STT está trabado | mirar `STT ✖` (Groq / API key / red) |
+| `FALLIDAS=N` | no llega al orquestador | `NET ✖`: IP/puerto/firewall |
+| `MUTE` todo el tiempo | se perdió un `SPEAK_END` | expira solo a los `MUTE_TIMEOUT_S`; revisar el orquestador |
+| `spotter oyó «oye»` y nunca la frase completa | Vosk no reconoce la variante | `LOG_DEBUG=1`, `python wake_spotter.py`, agregar variante a `WAKE_PHRASES` |
+| `spotter atrasado` | la Pi no da abasto | CPU |
+
+Colores: se activan solos si stdout es una terminal. `LOG_COLOR=1` los fuerza
+(útil con `| tee`), `LOG_COLOR=0` los apaga.
 
 ## Alimentación
 
@@ -347,8 +394,8 @@ que la Pi ve de su alimentación ([`battery.py`](battery.py)); también se puede
 correr suelto con `python linux/battery.py`:
 
 ```
-[POWER] Pi: entrada 5V real: 5.08 V
-[POWER] Pi: throttled=0x0  (ok)
+POWER entrada 5V real: 5.08 V
+POWER throttled=0x0  (ok)
 ```
 
 - `entrada 5V real` (`EXT5V_V`, Pi 5): si baja de 4.8 V la Pi avisa y es
@@ -365,20 +412,20 @@ cae bajo carga: probar cable más corto/grueso.
 
 - **`paInvalidSampleRate` when opening the stream** — the code already sets `PA_ALSA_PLUGHW=1` in `audio_capture.py` so PortAudio routes through ALSA's `plug` plugin and gets transparent sample-rate conversion. If you still see this, confirm the mic appears in `arecord -l` and that `libasound2-dev` is installed.
 - **Mic not detected** — run `arecord -l`. If empty, check the USB cable and that your user is in the `audio` group (`groups | grep audio`).
-- **Escucha pero nunca transcribe nada** — mirá la línea `[HB]` y la tabla de
+- **Escucha pero nunca transcribe nada** — mirá la línea `HB` y la tabla de
   la sección *Logs y diagnóstico*: dice en qué etapa se queda (mic, VAD,
   umbral, STT, wake word o red).
 - **`GROQ_API_KEY` not found** — make sure `linux/.env` exists and you ran the script from a shell where the venv is activated; `python-dotenv` loads it at import time in `main.py`.
 - **Model fails to load (local backend)** — verify `models/faster-whisper-<MODEL_SIZE>/` contains all four files (`config.json`, `model.bin`, `tokenizer.json`, `vocabulary.txt`) and that `MODEL_SIZE` in `config.py` matches the folder name.
-- **El robot no me escucha a mí** — mirá el log: si aparece `[VAD] descartada:
-  lejana/floja`, `NEAR_RMS_THRESHOLD` está muy alto para tu mic (el log imprime
-  el nivel medido: poné el umbral debajo de ese valor). Si aparece
-  `[WAKE] dormido, ignorado: ...`, transcribió bien pero no le dijiste "rai" —
-  o Whisper escribió el nombre de una forma que no está en `WAKE_WORDS`.
+- **El robot no me escucha a mí** — buscá la línea `✗ DESCARTADO`: dice la
+  razón. `lejana/floja` → `NEAR_RMS_THRESHOLD` está muy alto para tu mic (poné
+  el umbral debajo del `nivel` que imprime). `dormido y no dijo mi nombre` →
+  transcribió bien pero no le dijiste "rai", o Whisper escribió el nombre de
+  una forma que no está en `WAKE_WORDS`.
 - **Sigue enganchando conversaciones ajenas** — subí `NEAR_RMS_THRESHOLD` (y/o
   `NEAR_SNR_RATIO`) con `mic_level.py` en la mano; el wake word tapa el resto.
 - **High CPU / slow transcription** — on a Pi 5, stick to `tiny`, `base` or `small` for the local backend, or use the Groq backend.
-- **No despierta con "oye rai"** — mirá `oyó=...` en la línea `[HB]`: es lo último que Vosk entendió. Si dice `'oye'` y nunca `'oye ray'`, probá `LOG_DEBUG=1` y `python wake_spotter.py`, hablá más cerca, o agregá la variante que veas a `WAKE_PHRASES`. Si `desc=` (frames descartados del spotter) crece, la Pi no da abasto.
+- **No despierta con "oye rai"** — mirá `spotter oyó «…»` en la línea `HB`: es lo último que Vosk entendió. Si dice `«oye»` y nunca `«oye ray»`, probá `LOG_DEBUG=1` y `python wake_spotter.py`, hablá más cerca, o agregá la variante que veas a `WAKE_PHRASES`. Si aparece `spotter atrasado`, la Pi no da abasto.
 - **Despierta solo** — sacá variantes de `WAKE_PHRASES` (dejá sólo `oye rai,oye ray`) o subí `WAKE_COOLDOWN_S`. Si hay un parlante cerca del mic, bajá `WAKE_SOUND_VOLUME`.
 - **No suena el beep** — `python wake_sound.py`; si falla, elegí el parlante con `AUDIO_OUTPUT_DEVICE` (mismo listado que el mic al arrancar) o `WAKE_SOUND=none`.
 

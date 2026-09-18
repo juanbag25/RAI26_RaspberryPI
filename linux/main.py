@@ -24,7 +24,6 @@ from config import (
     BACKEND,
     CTRL_PORT,
     FRAME_MS,
-    NEAR_RMS_THRESHOLD,
     ORCH_EVENT_PREFIX,
     STT_PROMPT,
     WAKE_EVENTS_ENABLED,
@@ -34,7 +33,7 @@ from config import (
     WAKE_WORD_ENABLED,
 )
 from ctrl_server import SpeakMute, start_in_background
-from log import DEBUG, log
+from log import DEBUG, dbg, dim, drop, err, fmt, info, ok, warn
 from vad import VoiceActivityDetector
 from wake_sound import WakeSound
 from wake_word import WakeWord, normalize
@@ -74,11 +73,12 @@ def is_prompt_echo(text: str) -> bool:
 
 
 # --- NUEVA FUNCIÓN DE RED ---
-def send_to_orchestrator(text: str, ip: str, port: int) -> bool:
+def send_to_orchestrator(text: str, ip: str, port: int, *, quiet: bool = False) -> bool:
     """
     Envía el string al orquestador respetando el protocolo:
     [4 bytes de tamaño en Big Endian] + [N bytes del string]
-    Devuelve True si se envió.
+    Devuelve True si se envió. `quiet` no loguea el envío exitoso (eventos
+    de wake: la línea WAKE ya lo cuenta).
     """
     t0 = time.monotonic()
     try:
@@ -97,17 +97,20 @@ def send_to_orchestrator(text: str, ip: str, port: int) -> bool:
         ) as s:
             s.settimeout(ORCHESTRATOR_CONNECT_TIMEOUT_S)
             s.sendall(length_prefix + encoded_text)
-        log(f"[NET] enviado al orquestador {ip}:{port} "
-            f"({len(encoded_text)} B en {time.monotonic() - t0:.2f}s): «{text}»")
+        elapsed = time.monotonic() - t0
+        if quiet:
+            dbg(f"enviado {text!r} a {ip}:{port} ({len(encoded_text)} B, {elapsed:.2f}s)", "NET")
+        else:
+            ok("NET", f"enviado «{text}» ({elapsed:.2f}s)")
         return True
 
     except ConnectionRefusedError:
-        log(f"[NET ERROR] {ip}:{port} rechazó la conexión (¿orquestador encendido?)", err=True)
+        err("NET", f"{ip}:{port} rechazó la conexión (¿orquestador encendido?)")
     except socket.timeout:
-        log(f"[NET ERROR] timeout ({ORCHESTRATOR_CONNECT_TIMEOUT_S}s) conectando a "
-            f"{ip}:{port} (¿IP correcta? ¿misma red? ¿firewall?)", err=True)
+        err("NET", f"timeout ({ORCHESTRATOR_CONNECT_TIMEOUT_S}s) conectando a "
+            f"{ip}:{port} (¿IP correcta? ¿misma red? ¿firewall?)")
     except OSError as e:
-        log(f"[NET ERROR] no se pudo hablar con el orquestador en {ip}:{port}: {e}", err=True)
+        err("NET", f"no se pudo hablar con el orquestador en {ip}:{port}: {e}")
     return False
 # -----------------------------
 
@@ -150,20 +153,21 @@ def transcribe_worker(
         audio, level = item
         seconds = len(audio) / 16000.0
         pending = audio_queue.qsize()
-        log(f"[STT] transcribiendo {seconds:.1f}s de audio"
-            + (f" ({pending} más en cola)" if pending else "") + "...")
+        if pending:
+            warn("STT", f"{pending} utterances esperando en cola (Groq lento?)")
+        dbg(f"transcribiendo {seconds:.1f}s de audio...", "STT")
         t0 = time.monotonic()
         text = transcriber.transcribe(audio)
         elapsed = time.monotonic() - t0
         counters.transcribed += 1
         if not text:
             counters.empty += 1
-            log(f"[STT] vacío en {elapsed:.2f}s (error de Groq arriba, o Whisper no "
-                f"entendió nada: ¿audio muy flojo?)")
+            drop("STT", "Groq no devolvió texto (error arriba, o audio inaudible)",
+                 audio_s=f"{seconds:.1f}", nivel=level)
             continue
-        log(f"[STT] {elapsed:.2f}s >>> {text}")
+        info("STT", f"«{text}» ({elapsed:.2f}s)")
         if is_prompt_echo(text):
-            log("[STT] eco del prompt (ruido), descartado")
+            drop("STT", "eco del prompt de Whisper: es ruido, no habló nadie")
             continue
         # Wake word: hasta que lo llamen por su nombre, no sale nada de acá.
         payload = wake.filter(text, level)
@@ -200,8 +204,12 @@ def wake_event_worker(
             continue
         was_awake = awake
         name = "awake" if awake else "asleep"
-        log(f"[WAKE] -> {'despierto' if awake else 'dormido'}: aviso al orquestador ({name})")
-        send_to_orchestrator(ORCH_EVENT_PREFIX + name, orchestrator_ip, orchestrator_port)
+        if awake:
+            dim("WAKE", "aviso al orquestador: despierto")
+        else:
+            info("WAKE", f"DORMIDO (pasaron {WAKE_WINDOW_S:.0f}s sin hablarme), aviso al orquestador")
+        send_to_orchestrator(ORCH_EVENT_PREFIX + name, orchestrator_ip, orchestrator_port,
+                             quiet=True)
 
 
 def heartbeat_worker(
@@ -214,50 +222,82 @@ def heartbeat_worker(
 ) -> None:
     """Cada HEARTBEAT_S imprime un resumen del estado del pipeline.
 
-    Con esto se ve de un vistazo dónde se traba: si `frames` no crece, el mic
-    no entrega audio; si `voz` es 0 mientras hablás, webrtcvad no la detecta
-    (¿mic equivocado?); si `voz` sube pero `voz>umbral` no, el nivel no llega
-    (subí la ganancia o bajá RMS_THRESHOLD); si se abren utterances pero no se
-    aceptan, mirá los `[VAD] descartada` de arriba.
+    Con esto se ve de un vistazo dónde se traba: `SIN AUDIO DEL MIC`, el mic
+    no entrega audio; `sin voz` mientras hablás, webrtcvad no la detecta (¿mic
+    equivocado?); `voz` sube pero `fuerte` queda en 0, el nivel no llega al
+    umbral de apertura (subí la ganancia o bajá RMS_THRESHOLD); `utt desc` sin
+    `ok`, mirá los `VAD ✗ DESCARTADO` de arriba. Sale en gris si todo está
+    bien y en amarillo si detecta un problema.
     """
     last_muted = 0
+    last_beep = 0
     last_power = time.monotonic()
     while True:
         time.sleep(HEARTBEAT_S)
         st = vad.pop_stats()
-        muted_now = counters.muted_frames
-        muted_delta, last_muted = muted_now - last_muted, muted_now
+        muted_delta, last_muted = counters.muted_frames - last_muted, counters.muted_frames
+        beep_delta, last_beep = counters.beep_frames - last_beep, counters.beep_frames
+        got_frames = st.frames + muted_delta + beep_delta
         expected = int(HEARTBEAT_S * 1000 / FRAME_MS)
-        spot_note = ""
+
+        problem = False
+        parts: list[str] = []
+
+        # 1. ¿Llega audio?
+        if got_frames == 0:
+            parts.append("SIN AUDIO DEL MIC")
+            problem = True
+        elif got_frames < expected * 0.8:
+            parts.append(f"pocos frames: {got_frames} de ~{expected}")
+            problem = True
+        if muted_delta:
+            parts.append(f"mute {muted_delta * FRAME_MS / 1000:.1f}s")
+
+        # 2. ¿webrtcvad ve voz y llega al umbral de apertura?
+        if st.speech_frames == 0:
+            parts.append(f"sin voz (rms max {st.max_rms:.4f})")
+        else:
+            parts.append(f"voz {st.speech_frames * FRAME_MS / 1000:.1f}s, "
+                         f"fuerte {st.loud_speech_frames * FRAME_MS / 1000:.1f}s")
+        parts.append(fmt(ruido=vad.noise_floor, abre=vad.open_threshold(),
+                         cerca=vad.near_threshold()))
+
+        # 3. Utterances de la ventana.
+        if st.opened or st.accepted or st.rejected:
+            parts.append(f"utt ok={st.accepted} desc={st.rejected}"
+                         + (" (una abierta)" if vad.in_speech else ""))
+
+        # 4. Totales del proceso.
+        totals = f"total stt={counters.transcribed} env={counters.sent}"
+        if counters.empty:
+            totals += f" vacías={counters.empty}"
+        if counters.send_failed:
+            totals += f" FALLIDAS={counters.send_failed}"
+            problem = True
+        if audio_queue.qsize():
+            totals += f" cola={audio_queue.qsize()}"
+        parts.append(totals)
+
+        # 5. Estado.
+        if mute.is_muted():
+            parts.append("MUTE")
+        if wake.is_awake():
+            parts.append("despierto " + fmt(foco=wake.focus_level(), minimo=wake.min_level()))
+        else:
+            parts.append("dormido")
         if spotter is not None:
             sp = spotter.pop_stats()
-            spot_note = (f" | spot frames={sp.frames} desc={sp.dropped} "
-                         f"cola={spotter.queue_size()} wakes={counters.wakes} "
-                         f"dormido_desc={counters.asleep} oyó={sp.last_text!r}")
+            if sp.last_text:
+                parts.append(f"spotter oyó «{sp.last_text}»")
             if sp.dropped:
-                spot_note += "  <-- el spotter no da abasto (¿CPU?)"
-        audio_note = ""
-        if st.frames + muted_delta == 0:
-            audio_note = "  <-- SIN AUDIO DEL MIC"
-        elif st.frames + muted_delta < expected * 0.8:
-            audio_note = f"  <-- llegan pocos frames (esperados ~{expected})"
-        log(
-            f"[HB] frames={st.frames} muteados={muted_delta} "
-            f"voz={st.speech_frames} voz>umbral={st.loud_speech_frames} | "
-            f"rms max={st.max_rms:.4f} media={st.mean_rms:.4f} "
-            f"ruido={vad.noise_floor:.4f} umbral_abrir={vad.open_threshold():.4f} "
-            f"cerca={NEAR_RMS_THRESHOLD} | "
-            f"utt abiertas={st.opened} ok={st.accepted} desc={st.rejected} "
-            f"en_utt={'sí' if vad.in_speech else 'no'} | "
-            f"cola_stt={audio_queue.qsize()} stt={counters.transcribed} "
-            f"vacías={counters.empty} enviadas={counters.sent} "
-            f"fallidas={counters.send_failed} | "
-            f"mute={'SÍ' if mute.is_muted() else 'no'} "
-            f"wake={'despierto' if wake.is_awake() else 'dormido'}"
-            + (f" foco={wake.focus_level():.4f} mínimo={wake.min_level():.4f} "
-               f"ignoradas_por_foco={counters.unfocused}" if wake.is_awake() else "")
-            + f"{spot_note}{audio_note}"
-        )
+                parts.append(f"spotter atrasado: {sp.dropped} frames perdidos (¿CPU?)")
+                problem = True
+
+        line = " · ".join(parts)
+        if problem:
+            warn("HB", line)
+        else:
+            dim("HB", line)
         if POWER_LOG_S > 0 and time.monotonic() - last_power >= POWER_LOG_S:
             last_power = time.monotonic()
             report_power()
@@ -269,23 +309,19 @@ def main() -> None:
     ORCHESTRATOR_IP = os.getenv("ORCHESTRATOR_IP", Target_IP)  # <-- ¡Cambia esto por la IP de tu PC!
     ORCHESTRATOR_PORT = 9000
 
-    log("=== STT Pi arrancando ===")
+    info("MAIN", "=== STT Pi arrancando ===")
 
     # Alimentación: tensión de entrada y flags de undervoltage de la Pi.
     report_power()
 
-    log("Available audio devices:")
+    dim("AUDIO", "dispositivos de audio:")
     LinuxAudioCapture.list_devices()
-    print()
 
     # Mic opcional por .env (AUDIO_INPUT_DEVICE = índice de sounddevice).
     # Vacío = dispositivo default del sistema, igual que siempre en la Pi.
     device_env = os.getenv("AUDIO_INPUT_DEVICE", "").strip()
     audio_device = int(device_env) if device_env else None
-    log(f"Mic: {'default del sistema' if audio_device is None else f'device {audio_device}'}"
-        f" (AUDIO_INPUT_DEVICE={device_env!r})")
 
-    log(f"Loading transcriber (backend={BACKEND})...")
     transcriber = Transcriber()
     vad = VoiceActivityDetector()
     capture = LinuxAudioCapture(device_id=audio_device)
@@ -298,7 +334,7 @@ def main() -> None:
     # contestar, lo natural es que le sigan hablando sin repetir el nombre.
     mute = SpeakMute(on_speak_end=wake.refresh)
     start_in_background(CTRL_PORT, mute)
-    log(f"Speak-mute control server on 0.0.0.0:{CTRL_PORT}")
+    dim("CTRL", f"espero SPEAK_START/SPEAK_END del orquestador en :{CTRL_PORT}")
 
     # Wake por audio: spotter local (Vosk) + beep. Si no puede arrancar, el
     # robot sigue funcionando con el wake por texto de siempre.
@@ -309,24 +345,21 @@ def main() -> None:
             from wake_spotter import WakeSpotter
             spotter = WakeSpotter()
         except Exception as exc:  # noqa: BLE001 - ImportError, modelo ausente...
-            log(f"[SPOT] no pude arrancar el wake por audio ({type(exc).__name__}: {exc}); "
-                f"caigo a WAKE_MODE=text", err=True)
+            warn("SPOT", f"no pude arrancar el wake por audio ({type(exc).__name__}: {exc}); "
+                 f"caigo a WAKE_MODE=text")
     elif WAKE_WORD_ENABLED and WAKE_MODE != "text":
-        log(f"[SPOT] WAKE_MODE={WAKE_MODE!r} desconocido, uso 'text'", err=True)
+        warn("SPOT", f"WAKE_MODE={WAKE_MODE!r} desconocido, uso 'text'")
 
     if not WAKE_WORD_ENABLED:
-        log("Wake word DESACTIVADO (WAKE_WORD_ENABLED=False)")
+        warn("WAKE", "wake word DESACTIVADO (WAKE_WORD_ENABLED=False): se envía todo")
     elif spotter is not None:
-        log(f"Wake word por AUDIO: decile «{WAKE_PHRASES[0]}» y esperá el beep "
-            f"(ventana de {WAKE_WINDOW_S:.0f}s por turno; dormido no se transcribe nada)")
+        info("WAKE", f"modo AUDIO: decí «{WAKE_PHRASES[0]}» y esperá el beep; "
+             f"dormido no transcribo nada; ventana {WAKE_WINDOW_S:.0f}s")
     else:
-        log(f"Wake word por TEXTO: decile «rai» para que escuche "
-            f"(ventana de {WAKE_WINDOW_S:.0f}s por turno)")
-    log(f"Foco del mic: umbral de cercanía NEAR_RMS_THRESHOLD="
-        f"{NEAR_RMS_THRESHOLD} (calibrar con mic_level.py)")
-    log(f"Logs: heartbeat cada {HEARTBEAT_S:.0f}s (LOG_HEARTBEAT_S), "
-        f"debug por frame={'ON' if DEBUG else 'off'} (LOG_DEBUG=1), "
-        f"alimentación cada {POWER_LOG_S:.0f}s (POWER_LOG_S)")
+        info("WAKE", f"modo TEXTO: decí «rai» al principio de la frase; "
+             f"ventana {WAKE_WINDOW_S:.0f}s")
+    dim("MAIN", f"heartbeat cada {HEARTBEAT_S:.0f}s (LOG_HEARTBEAT_S), "
+        f"debug {'ON' if DEBUG else 'off'} (LOG_DEBUG=1)")
 
     # STT + envío al orquestador corren en un hilo aparte (ver
     # transcribe_worker): son las dos operaciones lentas/bloqueantes del
@@ -347,7 +380,6 @@ def main() -> None:
             args=(wake, ORCHESTRATOR_IP, ORCHESTRATOR_PORT),
             daemon=True,
         ).start()
-        log("Eventos de wake al orquestador: ON (chime remoto al despertar/dormirse)")
 
     if HEARTBEAT_S > 0:
         threading.Thread(
@@ -356,8 +388,7 @@ def main() -> None:
             daemon=True,
         ).start()
 
-    log(f"Listening. Sending outputs to {ORCHESTRATOR_IP}:{ORCHESTRATOR_PORT}")
-    log("Press Ctrl+C to stop.")
+    info("NET", f"orquestador en {ORCHESTRATOR_IP}:{ORCHESTRATOR_PORT}")
 
     try:
         first_frame = True
@@ -365,7 +396,7 @@ def main() -> None:
         for frame in capture.frames():
             if first_frame:
                 first_frame = False
-                log("[AUDIO] primer frame recibido del mic: el stream funciona")
+                ok("AUDIO", "primer frame del mic: escuchando")
             # El robot está hablando: ignorar audio (evita el autoescucha).
             if mute.is_muted():
                 if not was_muted:
@@ -392,7 +423,7 @@ def main() -> None:
                     # El "oye rai" ya cumplió: no gastar Groq en transcribirlo.
                     # Si la persona sigue hablando, el VAD abre otra utterance
                     # enseguida (pre-buffer de 200 ms) y esa sí va a Groq.
-                    vad.discard_open_utterance(reason="wake por audio")
+                    vad.discard_open_utterance(reason="era el «oye rai», no hace falta transcribirlo")
                     sound.play()
                     continue
             closed, audio = vad.process_frame(frame)
@@ -402,8 +433,8 @@ def main() -> None:
                 # escucha, y hasta que no oiga "oye rai" Groq no se entera.
                 if spotter is not None and not wake.is_awake():
                     counters.asleep += 1
-                    log(f"[MAIN] dormido: utterance descartada sin transcribir "
-                        f"(nivel={level:.4f}; decí «{WAKE_PHRASES[0]}»)")
+                    drop("WAKE", f"dormido: no transcribo hasta oír «{WAKE_PHRASES[0]}»",
+                         nivel=level)
                     continue
                 # Atención: despierto, sólo transcribimos lo que suena tan
                 # fuerte como quien dijo "rai" (el fondo no gasta Whisper).
@@ -411,11 +442,9 @@ def main() -> None:
                     counters.unfocused += 1
                     continue
                 audio_queue.put((audio, level))
-                log(f"[MAIN] utterance encolada para STT (nivel={level:.4f}, "
-                    f"cola={audio_queue.qsize()})")
 
     except KeyboardInterrupt:
-        log("Stopped.")
+        info("MAIN", "Stopped.")
 
 
 if __name__ == "__main__":
