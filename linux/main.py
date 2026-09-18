@@ -19,7 +19,7 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 from audio_capture import LinuxAudioCapture
-from battery import BATTERY_LOG_S, probe_ups, report_power
+from battery import POWER_LOG_S, report_power
 from config import (
     BACKEND,
     CTRL_PORT,
@@ -172,7 +172,6 @@ def heartbeat_worker(
     wake: WakeWord,
     audio_queue: "queue.Queue",
     counters: Counters,
-    ups,
 ) -> None:
     """Cada HEARTBEAT_S imprime un resumen del estado del pipeline.
 
@@ -183,7 +182,7 @@ def heartbeat_worker(
     aceptan, mirá los `[VAD] descartada` de arriba.
     """
     last_muted = 0
-    last_battery = time.monotonic()
+    last_power = time.monotonic()
     while True:
         time.sleep(HEARTBEAT_S)
         st = vad.pop_stats()
@@ -212,9 +211,9 @@ def heartbeat_worker(
                f"ignoradas_por_foco={counters.unfocused}" if wake.is_awake() else "")
             + f"{audio_note}"
         )
-        if BATTERY_LOG_S > 0 and time.monotonic() - last_battery >= BATTERY_LOG_S:
-            last_battery = time.monotonic()
-            report_power(ups)
+        if POWER_LOG_S > 0 and time.monotonic() - last_power >= POWER_LOG_S:
+            last_power = time.monotonic()
+            report_power()
 
 
 def main() -> None:
@@ -225,9 +224,8 @@ def main() -> None:
 
     log("=== STT Pi arrancando ===")
 
-    # Alimentación: batería del UPS (si hay) y lo que ve la Pi.
-    ups = probe_ups()
-    report_power(ups)
+    # Alimentación: tensión de entrada y flags de undervoltage de la Pi.
+    report_power()
 
     log("Available audio devices:")
     LinuxAudioCapture.list_devices()
@@ -263,7 +261,7 @@ def main() -> None:
         f"{NEAR_RMS_THRESHOLD} (calibrar con mic_level.py)")
     log(f"Logs: heartbeat cada {HEARTBEAT_S:.0f}s (LOG_HEARTBEAT_S), "
         f"debug por frame={'ON' if DEBUG else 'off'} (LOG_DEBUG=1), "
-        f"batería cada {BATTERY_LOG_S:.0f}s (BATTERY_LOG_S)")
+        f"alimentación cada {POWER_LOG_S:.0f}s (POWER_LOG_S)")
 
     # STT + envío al orquestador corren en un hilo aparte (ver
     # transcribe_worker): son las dos operaciones lentas/bloqueantes del
@@ -279,7 +277,7 @@ def main() -> None:
     if HEARTBEAT_S > 0:
         threading.Thread(
             target=heartbeat_worker,
-            args=(vad, mute, wake, audio_queue, counters, ups),
+            args=(vad, mute, wake, audio_queue, counters),
             daemon=True,
         ).start()
 

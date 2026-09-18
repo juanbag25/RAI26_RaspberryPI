@@ -277,32 +277,26 @@ Cómo leerlo cuando "se queda escuchando y no pasa nada":
 | `fallidas` crece | no llega al orquestador | `[NET ERROR]`: IP/puerto/firewall |
 | `mute=SÍ` todo el tiempo | se perdió un `SPEAK_END` | expira solo a los `MUTE_TIMEOUT_S`; revisar el orquestador |
 
-## Batería / alimentación
+## Alimentación
 
-Al arrancar (y cada `BATTERY_LOG_S` segundos, default 300) `main.py` loguea
-la alimentación ([`battery.py`](battery.py)); también se puede correr suelto
-con `python linux/battery.py`:
+Al arrancar (y cada `POWER_LOG_S` segundos, default 300) `main.py` loguea lo
+que la Pi ve de su alimentación ([`battery.py`](battery.py)); también se puede
+correr suelto con `python linux/battery.py`:
 
 ```
-[POWER] UPS detectado: MAX17048 fuel gauge (Geekworm X120x?) en I2C 0x36
-[POWER] MAX17048 fuel gauge (Geekworm X120x?): batería 87%  4.02 V  descargando (-6.2 %/h)
 [POWER] Pi: entrada 5V real: 5.08 V
 [POWER] Pi: throttled=0x0  (ok)
-[POWER] Pi: fuente negociada: 5000 mA
 ```
 
-- **UPS por I2C** — autodetecta los chips de los UPS más comunes: MAX17048
-  (Geekworm X1200/X1201/X1202/X1203, `0x36`), INA219 (Waveshare UPS HAT B/C,
-  `0x40`–`0x45`) y PiSugar 3 (`0x57`). Requiere `pip install smbus2` (ya está
-  en `requirements.txt`) y el I2C habilitado: `sudo raspi-config` → Interface
-  Options → I2C. Si el tuyo no aparece, `sudo apt install i2c-tools &&
-  i2cdetect -y 1` muestra qué dirección responde; se puede forzar con
-  `UPS_I2C_ADDR=0x..` en `.env` o agregar el chip en `battery.py`.
-- **La Pi misma** (`vcgencmd`, Pi 5) — tensión real de entrada (`EXT5V_V`:
-  si baja de 4.8 V la Pi avisa y es probable que se reinicie o suelte el USB
-  del mic), flags de undervoltage/throttling, y la corriente negociada por
-  USB-PD (5000 mA = fuente oficial; 3000 mA = fuente genérica, los USB quedan
-  limitados a 600 mA en total, lo que puede afectar al mic USB).
+- `entrada 5V real` (`EXT5V_V`, Pi 5): si baja de 4.8 V la Pi avisa y es
+  probable que se reinicie o suelte el USB del mic.
+- `throttled`: flags de undervoltage/throttling, ahora y desde el boot.
+
+La Pi se alimenta por USB-C desde la salida USB-A del UPS (SunFounder
+PiPower). Por ese cable no hay USB-PD (la Pi siempre asume 900 mA de fuente,
+no importa) ni I2C, así que no se puede leer el % de batería del UPS desde la
+Pi. Si aparece `hubo undervoltage desde el boot` seguido, el cable USB-A→C
+cae bajo carga: probar cable más corto/grueso.
 
 ## Troubleshooting
 
