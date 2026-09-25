@@ -31,7 +31,9 @@ import webrtcvad
 from log import dbg, dim, drop, fmt, ok
 
 from config import (
+    CLOSE_RMS_RATIO,
     FRAME_MS,
+    MAX_UTTERANCE_MS,
     MIN_UTTERANCE_MS,
     NEAR_RMS_THRESHOLD,
     NEAR_SNR_RATIO,
@@ -73,6 +75,7 @@ class VoiceActivityDetector:
         self._pre_buffer: deque[bytes] = deque(maxlen=padding_frames)
         self._silence_frames_to_close = max(1, SILENCE_MS // FRAME_MS)
         self._min_speech_frames = max(1, MIN_UTTERANCE_MS // FRAME_MS)
+        self._max_utterance_frames = max(1, MAX_UTTERANCE_MS // FRAME_MS)
         self._noise_floor = NOISE_FLOOR_INIT
         # Nivel (p90) de la última utterance aceptada: main.py lo lee justo
         # después de process_frame() para la atención del wake word.
@@ -170,14 +173,19 @@ class VoiceActivityDetector:
             return False, None
 
         self._utterance.append(frame_bytes)
-        if is_speech:
+        # Sólo la voz fuerte mantiene abierta la utterance: con ruido de fondo
+        # webrtcvad dice "voz" casi siempre y la frase no cerraba nunca.
+        if is_speech and rms >= self.open_threshold() * CLOSE_RMS_RATIO:
             self._silence_count = 0
             self._speech_frame_count += 1
             self._speech_levels.append(rms)
-            return False, None
+        else:
+            self._silence_count += 1
 
-        self._silence_count += 1
-        if self._silence_count >= self._silence_frames_to_close:
+        too_long = len(self._utterance) >= self._max_utterance_frames
+        if too_long:
+            dim("VAD", f"utterance de {MAX_UTTERANCE_MS} ms sin silencio: la cierro igual")
+        if too_long or self._silence_count >= self._silence_frames_to_close:
             accepted = self._utterance_accepted()
             audio = self._finalize_utterance() if accepted else None
             if accepted:

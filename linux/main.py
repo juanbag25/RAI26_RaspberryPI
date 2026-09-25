@@ -469,6 +469,10 @@ def main() -> None:
                     sound.play()
                     continue
             closed, audio = vad.process_frame(frame)
+            # Mientras le están hablando no se duerme: si la ventana vence a
+            # mitad de frase, al cerrarla se descartaría por "dormido".
+            if vad.in_speech:
+                wake.refresh()
             if closed and audio is not None:
                 level = vad.last_level
                 # Modo audio: dormido no se transcribe nada. Sólo el spotter

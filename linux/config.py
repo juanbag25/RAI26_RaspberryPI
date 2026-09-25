@@ -76,6 +76,16 @@ MUTE_TIMEOUT_S = 30.0
 
 VAD_AGGRESSIVENESS = 3
 SILENCE_MS = 700
+# Para CERRAR una utterance cuenta como silencio todo frame que no sea voz
+# fuerte: webrtcvad solo, con ruido de fondo (ventiladores, motores, gente)
+# dice "voz" casi todo el tiempo y la frase queda abierta para siempre. Un
+# frame sigue la utterance si es voz Y su RMS llega a umbral_apertura × este
+# factor. 1.0 = hace falta la misma fuerza que para abrir; bajalo si corta
+# frases a la mitad cuando alguien baja la voz.
+CLOSE_RMS_RATIO = _env_float("CLOSE_RMS_RATIO", 1.0)
+# Tope de duración de una utterance: pasado esto se cierra igual y se evalúa
+# (va a Groq si pasa el filtro). Red de seguridad por si el cierre no llega.
+MAX_UTTERANCE_MS = int(_env_float("MAX_UTTERANCE_MS", 12000))
 PRE_SPEECH_PADDING_MS = 200
 # Duración mínima de voz real dentro de una utterance para enviarla a Whisper.
 # Descarta falsos positivos cortos que suelen alucinar "gracias", etc.
