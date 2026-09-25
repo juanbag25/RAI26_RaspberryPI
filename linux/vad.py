@@ -32,6 +32,7 @@ from log import dbg, dim, drop, fmt, ok
 
 from config import (
     CLOSE_RMS_RATIO,
+    CONTINUE_LEVEL_RATIO,
     FRAME_MS,
     MAX_UTTERANCE_MS,
     MIN_UTTERANCE_MS,
@@ -40,6 +41,7 @@ from config import (
     NOISE_FLOOR_ALPHA,
     NOISE_FLOOR_INIT,
     NOISE_FLOOR_MAX,
+    NOISE_WINDOW_MS,
     ONSET_SPEECH_FRAMES,
     PRE_SPEECH_PADDING_MS,
     RMS_THRESHOLD,
@@ -77,6 +79,7 @@ class VoiceActivityDetector:
         self._min_speech_frames = max(1, MIN_UTTERANCE_MS // FRAME_MS)
         self._max_utterance_frames = max(1, MAX_UTTERANCE_MS // FRAME_MS)
         self._noise_floor = NOISE_FLOOR_INIT
+        self._recent_rms: deque[float] = deque(maxlen=max(1, NOISE_WINDOW_MS // FRAME_MS))
         # Nivel (p90) de la última utterance aceptada: main.py lo lee justo
         # después de process_frame() para la atención del wake word.
         self.last_level = 0.0
@@ -133,6 +136,14 @@ class VoiceActivityDetector:
         """Umbral vivo de cercanía (segunda etapa, sobre la utterance entera)."""
         return max(NEAR_RMS_THRESHOLD, self._noise_floor * NEAR_SNR_RATIO)
 
+    def continue_threshold(self) -> float:
+        """Umbral para que un frame siga la utterance abierta: el de apertura
+        (× CLOSE_RMS_RATIO) o una fracción de la voz de esta misma frase, el
+        mayor. Lo segundo es lo que corta el ruido del robot caminando: está
+        por encima del umbral absoluto pero muy por debajo de quien habla."""
+        absolute = self.open_threshold() * CLOSE_RMS_RATIO
+        return max(absolute, self._utterance_level() * CONTINUE_LEVEL_RATIO)
+
     def process_frame(self, frame_bytes: bytes) -> tuple[bool, np.ndarray | None]:
         is_speech = self._vad.is_speech(frame_bytes, SAMPLE_RATE)
         rms = self._frame_rms(frame_bytes)
@@ -146,6 +157,8 @@ class VoiceActivityDetector:
             st.speech_frames += 1
             if rms >= self.open_threshold():
                 st.loud_speech_frames += 1
+
+        self._track_window_floor(rms)
 
         if not self._in_speech:
             self._pre_buffer.append(frame_bytes)
@@ -175,7 +188,7 @@ class VoiceActivityDetector:
         self._utterance.append(frame_bytes)
         # Sólo la voz fuerte mantiene abierta la utterance: con ruido de fondo
         # webrtcvad dice "voz" casi siempre y la frase no cerraba nunca.
-        if is_speech and rms >= self.open_threshold() * CLOSE_RMS_RATIO:
+        if is_speech and rms >= self.continue_threshold():
             self._silence_count = 0
             self._speech_frame_count += 1
             self._speech_levels.append(rms)
@@ -184,7 +197,8 @@ class VoiceActivityDetector:
 
         too_long = len(self._utterance) >= self._max_utterance_frames
         if too_long:
-            dim("VAD", f"utterance de {MAX_UTTERANCE_MS} ms sin silencio: la cierro igual")
+            dim("VAD", f"utterance de {MAX_UTTERANCE_MS} ms sin silencio: la cierro igual "
+                + fmt(ruido=self._noise_floor, abre=self.open_threshold()))
         if too_long or self._silence_count >= self._silence_frames_to_close:
             accepted = self._utterance_accepted()
             audio = self._finalize_utterance() if accepted else None
@@ -232,6 +246,18 @@ class VoiceActivityDetector:
         if not self._speech_levels:
             return 0.0
         return float(np.percentile(self._speech_levels, 90))
+
+    def _track_window_floor(self, rms: float) -> None:
+        """Sube el piso al percentil 10 de los últimos NOISE_WINDOW_MS, con o
+        sin utterance abierta. Sólo sube: bajar lo sigue haciendo la EMA de
+        los frames descartados. Se recalcula cada 10 frames (300 ms)."""
+        self._recent_rms.append(rms)
+        window = self._recent_rms
+        if len(window) < window.maxlen or self._stats.frames % 10:
+            return
+        floor = min(float(np.percentile(window, 10)), NOISE_FLOOR_MAX)
+        if floor > self._noise_floor:
+            self._noise_floor = floor
 
     def _update_noise_floor(self, rms: float) -> None:
         # Sube rápido y baja lento (así el murmullo de fondo eleva el umbral

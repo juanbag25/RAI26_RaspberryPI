@@ -83,6 +83,13 @@ SILENCE_MS = 700
 # factor. 1.0 = hace falta la misma fuerza que para abrir; bajalo si corta
 # frases a la mitad cuando alguien baja la voz.
 CLOSE_RMS_RATIO = _env_float("CLOSE_RMS_RATIO", 1.0)
+# Además, relativo a la VOZ de la propia utterance: un frame sólo la sigue si
+# llega a nivel_de_la_frase (p90 de su voz hasta ahora) × este factor. Con el
+# robot caminando el ruido de motores/pasos está muy por debajo de quien le
+# habla de cerca: eso cuenta como silencio y la frase cierra. Subilo (0.5) si
+# el ruido sigue estirando frases; bajalo (0.2) si corta cuando bajás la voz.
+# 0 = desactivado.
+CONTINUE_LEVEL_RATIO = _env_float("CONTINUE_LEVEL_RATIO", 0.35)
 # Tope de duración de una utterance: pasado esto se cierra igual y se evalúa
 # (va a Groq si pasa el filtro). Red de seguridad por si el cierre no llega.
 MAX_UTTERANCE_MS = int(_env_float("MAX_UTTERANCE_MS", 12000))
@@ -116,7 +123,16 @@ ONSET_SPEECH_FRAMES = int(_env_float("ONSET_SPEECH_FRAMES", 3))
 # topeado para que un ruido fuerte no deje al robot sordo.
 NOISE_FLOOR_INIT = 0.005
 NOISE_FLOOR_ALPHA = 0.05
-NOISE_FLOOR_MAX = _env_float("NOISE_FLOOR_MAX", 0.02)
+# Tope del piso. Con el robot caminando (motores, pasos) el fondo sube mucho:
+# 0.05 deja que el umbral para abrir llegue a 0.05 × NEAR_SNR_RATIO = 0.15.
+# Ojo: con ese ruido hay que hablarle más fuerte/cerca; si te ignora caminando,
+# bajá NEAR_SNR_RATIO (2) antes que este tope.
+NOISE_FLOOR_MAX = _env_float("NOISE_FLOOR_MAX", 0.05)
+# Además el piso se estima SIEMPRE (también con una frase abierta) como el
+# percentil 10 del RMS de esta ventana: al hablar siempre hay pausas, así que
+# ese mínimo es el ruido. Sin esto, un ruido que arranca de golpe (el robot
+# empieza a caminar) abre una frase antes de que el piso lo aprenda.
+NOISE_WINDOW_MS = int(_env_float("NOISE_WINDOW_MS", 2000))
 
 # --- Wake word ----------------------------------------------------------------
 # Con esto activado el robot ignora TODO lo que se transcribe hasta que alguien
