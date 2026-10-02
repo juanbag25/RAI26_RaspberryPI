@@ -1,6 +1,7 @@
 """VAD + filtro de cercanía (foco del micrófono).
 
-webrtcvad sólo dice "esto es voz humana", no "esto me lo están diciendo a mí":
+El detector de voz (Silero por default, webrtcvad como alternativa:
+VAD_ENGINE) sólo dice "esto es voz humana", no "esto me lo están diciendo a mí":
 con un mic omnidireccional, una charla del otro lado de la sala abre utterances
 y Whisper las transcribe. Encima de webrtcvad va entonces un filtro de energía
 en dos etapas, porque la voz de quien le habla al robot de cerca llega mucho
@@ -27,6 +28,7 @@ Los umbrales se calibran con `python mic_level.py`.
 
 from __future__ import annotations
 
+import os
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -34,7 +36,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import webrtcvad
 
-from log import dbg, dim, drop, fmt, ok
+from log import dbg, dim, drop, fmt, ok, warn
 
 from config import (
     CLOSE_RMS_RATIO,
@@ -53,7 +55,10 @@ from config import (
     RMS_THRESHOLD,
     SAMPLE_RATE,
     SILENCE_MS,
+    SILERO_MODEL_PATH,
+    SILERO_THRESHOLD,
     VAD_AGGRESSIVENESS,
+    VAD_ENGINE,
 )
 
 
@@ -63,7 +68,7 @@ class VadStats:
     main.py). Sirven para responder, sin adivinar, por qué "no escucha":
     ¿llega audio? ¿webrtcvad ve voz? ¿el nivel llega al umbral de apertura?"""
     frames: int = 0
-    speech_frames: int = 0        # webrtcvad dijo "voz"
+    speech_frames: int = 0        # el detector (silero/webrtc) dijo "voz"
     loud_speech_frames: int = 0   # voz Y por encima del umbral de apertura
     max_rms: float = 0.0
     sum_rms: float = 0.0
@@ -76,9 +81,26 @@ class VadStats:
         return self.sum_rms / self.frames if self.frames else 0.0
 
 
+def _make_speech_detector():
+    """(detector con .is_speech(frame, sr), nombre). Silero si se puede; si
+    falta onnxruntime o el modelo, webrtcvad con un aviso (el robot sigue
+    escuchando, peor con ruido)."""
+    if VAD_ENGINE == "silero":
+        try:
+            from silero_vad import SileroVad
+            if not os.path.isfile(SILERO_MODEL_PATH):
+                raise FileNotFoundError(f"falta {SILERO_MODEL_PATH} (ver README)")
+            return SileroVad(SILERO_MODEL_PATH, SILERO_THRESHOLD), f"silero>={SILERO_THRESHOLD:g}"
+        except Exception as exc:  # noqa: BLE001 - ImportError, modelo ausente...
+            warn("VAD", f"no pude cargar Silero ({type(exc).__name__}: {exc}); uso webrtcvad")
+    elif VAD_ENGINE != "webrtc":
+        warn("VAD", f"VAD_ENGINE={VAD_ENGINE!r} desconocido, uso webrtc")
+    return webrtcvad.Vad(VAD_AGGRESSIVENESS), f"webrtc{VAD_AGGRESSIVENESS}"
+
+
 class VoiceActivityDetector:
     def __init__(self) -> None:
-        self._vad = webrtcvad.Vad(VAD_AGGRESSIVENESS)
+        self._vad, self.engine = _make_speech_detector()
         padding_frames = max(1, PRE_SPEECH_PADDING_MS // FRAME_MS)
         self._pre_buffer: deque[bytes] = deque(maxlen=padding_frames)
         self._silence_frames_to_close = max(1, SILENCE_MS // FRAME_MS)
@@ -95,7 +117,7 @@ class VoiceActivityDetector:
         self._utt_start_t = 0.0
         self._stats = VadStats()
         self._reset_utterance()
-        dim("VAD", f"filtro: abre>={RMS_THRESHOLD} cerca>={NEAR_RMS_THRESHOLD} "
+        dim("VAD", f"voz={self.engine} filtro: abre>={RMS_THRESHOLD} cerca>={NEAR_RMS_THRESHOLD} "
             f"snr x{NEAR_SNR_RATIO} min_voz={MIN_UTTERANCE_MS}ms silencio={SILENCE_MS}ms")
 
     def pop_stats(self) -> VadStats:

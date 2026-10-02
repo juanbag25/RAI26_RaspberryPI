@@ -106,6 +106,28 @@ unzip vosk-model-small-es-0.42.zip && rm vosk-model-small-es-0.42.zip
 Si falta, `main.py` avisa y arranca en `WAKE_MODE=text` (funciona igual, más
 lento). Probalo solo con `python wake_spotter.py`.
 
+## 4c. Silero VAD (detector de voz)
+
+`VAD_ENGINE=silero` (el default) decide "¿esto es voz humana?" con una red
+neuronal que corre local en la Pi ([`silero_vad.py`](silero_vad.py),
+onnxruntime en CPU, <1 ms por bloque; sin servicios ni internet). Necesita el
+modelo (~2 MB) en `models/`:
+
+```bash
+cd ~/RAI26_RaspberryPI
+curl -L -o models/silero_vad.onnx \
+  https://raw.githubusercontent.com/snakers4/silero-vad/master/src/silero_vad/data/silero_vad.onnx
+```
+
+Por qué: webrtcvad (el anterior) es estadístico y el ruido le parece voz. En
+una prueba con audio del ReSpeaker + ruidos tipo robot, webrtcvad marcó como
+voz el 100 % de un ventilador y el 63 % de ruido de motor; Silero, 0 % de
+ambos, y sigue detectando la voz con el robot en marcha. Si falta el modelo u
+onnxruntime, `main.py` avisa y vuelve a webrtcvad solo; `VAD_ENGINE=webrtc`
+lo fuerza. El log de arranque dice cuál usa: `VAD filtro: voz=silero>=0.5 ...`.
+`SILERO_THRESHOLD` (0.5): bajalo si se come el principio de frases dichas
+bajo, subilo si todavía abre con ruido.
+
 ## 5. Configure the `.env`
 
 Create `linux/.env` (it's already gitignored; see `linux/.env.example`):
@@ -290,9 +312,11 @@ menor impacto:
    pasa-altos más alto `HPFONOFF=3` (180 Hz, corta golpes graves de los
    pasos) y más supresión de ruido no estacionario `GAMMA_NN=1.5`, `MIN_NN=0.2`.
    Probalo con `python respeaker.py NOMBRE VALOR` antes de dejarlo fijo.
-3. **Dirección**: el ruido de marcha no viene de un punto fijo, así que sus
+3. **Detector de voz neuronal** (Silero, default): pasos, motores y
+   ventiladores no le parecen voz, así que no abren ni estiran frases.
+4. **Dirección**: el ruido de marcha no viene de un punto fijo, así que sus
    lecturas de DoA se dispersan y no llegan al `DOA_MIN_IN_FOCUS` del foco.
-4. **Hablarle cerca**: con el robot en marcha la diferencia la hace la
+5. **Hablarle cerca**: con el robot en marcha la diferencia la hace la
    distancia; la calibración avisa si el ruido llega a tu voz.
 
 ### Orden de corte mientras el robot habla (experimental)

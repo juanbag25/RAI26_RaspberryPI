@@ -74,6 +74,18 @@ CTRL_PORT = 9001
 # Auto-desmute si se pierde el SPEAK_END (segundos).
 MUTE_TIMEOUT_S = 30.0
 
+# Qué decide "¿esto es voz humana?" (el filtro de cercanía por nivel va
+# encima en los dos casos):
+#   "silero": red neuronal (silero_vad.py, onnxruntime, local en la Pi). No
+#             confunde pasos, motores ni ventiladores con voz. Necesita
+#             models/silero_vad.onnx (ver README); si falta, cae a webrtc.
+#   "webrtc": webrtcvad, el de siempre (estadístico: el ruido le parece voz).
+VAD_ENGINE = _env_str("VAD_ENGINE", "silero").lower()
+# Probabilidad mínima de voz para Silero (0-1). Bajala (0.35) si se come el
+# arranque de frases dichas bajo; subila (0.6) si todavía abre con ruido.
+SILERO_THRESHOLD = _env_float("SILERO_THRESHOLD", 0.5)
+SILERO_MODEL_NAME = _env_str("SILERO_MODEL_NAME", "silero_vad.onnx")
+# Sólo para VAD_ENGINE=webrtc (0-3).
 VAD_AGGRESSIVENESS = 3
 SILENCE_MS = 700
 # Para CERRAR una utterance cuenta como silencio todo frame que no sea voz
@@ -300,3 +312,4 @@ DOA_SPEAKER_SECTOR = _env_str("DOA_SPEAKER_SECTOR", "")
 _HERE = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(_HERE, "..", "models", f"faster-whisper-{MODEL_SIZE}")
 WAKE_MODEL_PATH = os.path.join(_HERE, "..", "models", WAKE_MODEL_NAME)
+SILERO_MODEL_PATH = os.path.join(_HERE, "..", "models", SILERO_MODEL_NAME)
