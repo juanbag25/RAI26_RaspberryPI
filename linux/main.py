@@ -32,6 +32,7 @@ from config import (
     DOA_SPEAKER_SECTOR,
     DOA_TOLERANCE_DEG,
     FRAME_MS,
+    MIC_MODE,
     ORCH_EVENT_PREFIX,
     RESPEAKER_ENABLED,
     RESPEAKER_LED_BRIGHTNESS,
@@ -40,7 +41,9 @@ from config import (
     SPEAK_LISTEN_MODE,
     SPEAK_STOP_PHRASES,
     STT_PROMPT,
+    WAKE_ACK_DECIDE_MS,
     WAKE_DOA_WINDOW_S,
+    WAKE_FOLLOW_SPEECH_MS,
     WAKE_MODE,
     WAKE_PHRASES,
     WAKE_WINDOW_S,
@@ -186,7 +189,9 @@ def transcribe_worker(
                 return
             drop("STT", "superada por una más nueva en cola")
             item = newer
-        audio, level, queued_at = item
+        # wake_prefix: la frase empieza con el «oye rai» que oyó el spotter
+        # (la persona siguió hablando sin esperar el «Sí, dime»).
+        audio, level, queued_at, wake_prefix = item
         age = time.monotonic() - queued_at
         if age > MAX_QUEUE_AGE_S:
             counters.dropped_stale += 1
@@ -210,11 +215,20 @@ def transcribe_worker(
         if is_prompt_echo(text):
             drop("STT", "eco del prompt de Whisper: es ruido, no habló nadie")
             continue
+        if wake_prefix:
+            text = wake.strip_wake(text)
+            if not text:
+                # Al final era sólo el nombre: ahora sí, «Sí, dime».
+                dim("WAKE", "la frase era sólo el «oye rai»: pido el «Sí, dime»")
+                wake.announce()
+                continue
         # Wake word: hasta que lo llamen por su nombre, no sale nada de acá.
         payload = wake.filter(text, level)
         if payload:
             if send_to_orchestrator(payload, orchestrator_ip, orchestrator_port):
                 counters.sent += 1
+                # No dormirse mientras el robot piensa la respuesta.
+                wake.await_reply()
             else:
                 counters.send_failed += 1
 
@@ -489,6 +503,11 @@ def main() -> None:
     capture = LinuxAudioCapture(device_id=audio_device)
 
     # Mic array: parámetros DSP + lecturas de dirección (DoA) por USB.
+    info("AUDIO", f"MIC_MODE={MIC_MODE} "
+         + ("(ReSpeaker: foco por dirección)" if MIC_MODE == "array" else "(mic común, mono)"))
+    if MIC_MODE == "array" and not capture.is_array:
+        warn("AUDIO", "MIC_MODE=array pero no encontré el ReSpeaker: uso el mic default "
+             "como mono, con los umbrales *_ARRAY (¿era MIC_MODE=normal?)")
     array = ReSpeaker.open() if RESPEAKER_ENABLED else None
     if array is not None and not capture.is_array:
         warn("ARRAY", "el ReSpeaker está conectado pero el audio sale de otro mic "
@@ -513,7 +532,8 @@ def main() -> None:
     # y acá se descartan los frames, así el robot no se transcribe a sí mismo.
     # El SPEAK_END además renueva la ventana del wake word: el robot acaba de
     # contestar, lo natural es que le sigan hablando sin repetir el nombre.
-    mute = SpeakMute(on_speak_end=wake.refresh)
+    # El SPEAK_START congela la ventana mientras el robot habla.
+    mute = SpeakMute(on_speak_end=wake.refresh, on_speak_start=wake.hold)
     start_in_background(CTRL_PORT, mute)
     dim("CTRL", f"espero SPEAK_START/SPEAK_END del orquestador en :{CTRL_PORT}")
 
@@ -576,9 +596,10 @@ def main() -> None:
             daemon=True,
         ).start()
 
-    def handle_wake(heard: str, now: float) -> bool:
+    def handle_wake(heard: str, now: float, announce: bool = True) -> bool:
         """El spotter oyó la frase de wake. Despierta (o pasa el foco a quien
-        la dijo) y fija la dirección. False si no corresponde atenderla."""
+        la dijo) y fija la dirección. False si no corresponde atenderla.
+        `announce=False`: el «Sí, dime» lo decide el loop (WAKE_ACK_DECIDE_MS)."""
         reading = spatial.reading(now - WAKE_DOA_WINDOW_S, now)
         if spatial.enabled and reading.n >= 2 and reading.blocked >= 0.6:
             drop("WAKE", f"«{heard}» desde un sector de ruido del robot",
@@ -596,7 +617,7 @@ def main() -> None:
                      nivel=level, umbral=near, dir=_deg(reading.direction))
                 return False
         old_focus = spatial.focus.focus
-        wake.wake_from_audio()
+        wake.wake_from_audio(announce=announce)
         if spatial.enabled:
             new_focus = reading.direction if reading.n >= 2 else None
             spatial.focus.lock(new_focus)
@@ -613,6 +634,13 @@ def main() -> None:
     barge = BargeIn()
 
     info("NET", f"orquestador en {ORCHESTRATOR_IP}:{ORCHESTRATOR_PORT}")
+
+    # «Oye rai» y después ¿siguió hablando? (ver WAKE_ACK_DECIDE_MS)
+    # ack_pending_t: cuándo disparó el spotter, mientras se decide.
+    # wake_utt_open: la utterance abierta empieza con el «oye rai» y trae la
+    # orden: al cerrarse va entera a Whisper (y se le saca el nombre).
+    ack_pending_t: float | None = None
+    wake_utt_open = False
 
     try:
         first_frame = True
@@ -631,6 +659,8 @@ def main() -> None:
                     # hablar es viejo: no dejar que se cierre (y se envíe)
                     # recién al desmutear.
                     vad.discard_open_utterance()
+                    ack_pending_t = None
+                    wake_utt_open = False
                     # Utterances que ya se habían cerrado y encolado antes de
                     # este mute también son viejas: sin esto, se transcriben
                     # y mandan igual, recién cuando el robot ya terminó de
@@ -674,19 +704,49 @@ def main() -> None:
                 heard = spotter.take_detection()
                 # Las órdenes de corte sólo valen mientras el robot habla.
                 if heard and not spotter.is_stop(heard):
-                    if handle_wake(heard, af.t):
+                    if handle_wake(heard, af.t, announce=False):
                         counters.wakes += 1
-                        # El "oye rai" ya cumplió: no gastar Groq en
-                        # transcribirlo. Si la persona sigue hablando, el VAD
-                        # abre otra utterance enseguida (pre-buffer de 200 ms)
-                        # y esa sí va a Groq.
-                        vad.discard_open_utterance(reason="era el «oye rai», no hace falta transcribirlo")
-                        continue
+                        # No se tira la utterance: si la persona sigue de
+                        # largo ("oye rai, sentate"), la orden ya empezó acá y
+                        # cortarla se comía la primera palabra. Se marca y en
+                        # WAKE_ACK_DECIDE_MS se decide (abajo).
+                        wake_utt_open = False
+                        if vad.mark():
+                            ack_pending_t = af.t
+                        else:
+                            ack_pending_t = None
+                            wake.announce()
             closed, audio = vad.process_frame(frame, af.rms, af.t)
+            if ack_pending_t is not None:
+                if closed or not vad.in_speech:
+                    # Se cerró antes de decidir: era sólo el nombre.
+                    ack_pending_t = None
+                    wake.announce()
+                    if closed:
+                        dim("WAKE", "era sólo el «oye rai», no lo transcribo")
+                        continue
+                elif af.t - ack_pending_t >= WAKE_ACK_DECIDE_MS / 1000.0:
+                    ack_pending_t = None
+                    follow_ms = vad.speech_ms_since_mark()
+                    if follow_ms >= WAKE_FOLLOW_SPEECH_MS:
+                        wake_utt_open = True
+                        info("WAKE", f"siguió hablando tras el «oye rai» ({follow_ms} ms de voz): "
+                             "mando la frase entera, sin «Sí, dime»")
+                    else:
+                        wake.announce()
+                        vad.discard_open_utterance(
+                            reason="era el «oye rai», no hace falta transcribirlo")
             # Mientras le están hablando no se duerme: si la ventana vence a
             # mitad de frase, al cerrarla se descartaría por "dormido".
             if vad.in_speech:
                 wake.refresh()
+            wake_prefix = False
+            if wake_utt_open and not vad.in_speech:
+                # La frase del «oye rai» terminó: si el VAD la rechazó, igual
+                # está despierto, así que «Sí, dime» y que repita la orden.
+                wake_prefix, wake_utt_open = True, False
+                if not closed:
+                    wake.announce()
             if closed and audio is not None:
                 level = vad.last_level
                 # Modo audio: dormido no se transcribe nada. Sólo el spotter
@@ -716,7 +776,7 @@ def main() -> None:
                 if not wake.accepts_level(level):
                     counters.unfocused += 1
                     continue
-                audio_queue.put((audio, level, time.monotonic()))
+                audio_queue.put((audio, level, time.monotonic(), wake_prefix))
 
     except KeyboardInterrupt:
         info("MAIN", "Stopped.")

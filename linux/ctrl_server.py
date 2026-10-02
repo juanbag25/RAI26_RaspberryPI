@@ -27,8 +27,12 @@ _MAX_MESSAGE_BYTES = 1024
 
 class SpeakMute:
     def __init__(self, timeout_s: float = MUTE_TIMEOUT_S,
-                 on_speak_end: Callable[[], None] | None = None) -> None:
+                 on_speak_end: Callable[[], None] | None = None,
+                 on_speak_start: Callable[[], None] | None = None) -> None:
         self._timeout = timeout_s
+        # Se llama cuando el robot empieza a hablar: el wake word congela la
+        # ventana de conversación mientras dura.
+        self._on_speak_start = on_speak_start
         # Se llama cuando el robot termina de hablar (o expira el mute): lo usa
         # el wake word para renovar la ventana de conversación.
         self._on_speak_end = on_speak_end
@@ -46,18 +50,23 @@ class SpeakMute:
         return True
 
     def _notify_speak_end(self) -> None:
-        if self._on_speak_end is None:
+        self._notify(self._on_speak_end, "on_speak_end")
+
+    @staticmethod
+    def _notify(callback: Callable[[], None] | None, name: str) -> None:
+        if callback is None:
             return
         try:
-            self._on_speak_end()
+            callback()
         except Exception as exc:  # noqa: BLE001 - nunca matar el loop de mic
-            err("CTRL", f"on_speak_end: {exc}")
+            err("CTRL", f"{name}: {exc}")
 
     def handle(self, message: str) -> None:
         if message == "SPEAK_START":
             self._deadline = time.monotonic() + self._timeout
             self._muted.set()
             info("CTRL", "robot habla: mic MUTEADO")
+            self._notify(self._on_speak_start, "on_speak_start")
         elif message == "SPEAK_END":
             self._muted.clear()
             info("CTRL", "robot terminó: mic activo")

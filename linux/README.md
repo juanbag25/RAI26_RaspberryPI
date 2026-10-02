@@ -189,8 +189,13 @@ principal (R-AI-026).
 
 ## Mic array: ReSpeaker USB Mic Array v2.0
 
-Si está conectado, `main.py` lo detecta solo (`RESPEAKER_ENABLED=false` lo
-ignora). Firmware de 6 canales, 16 kHz (verificado: viene así de fábrica):
+Se usa sólo con `MIC_MODE=array` en `.env`. El default es `MIC_MODE=normal`
+(mic USB común, mono): funcionó mejor en las pruebas. Los umbrales de nivel
+tienen un valor por modo porque la escala del array es ~10 dB más baja:
+`RMS_THRESHOLD`, `NEAR_RMS_THRESHOLD`, `NEAR_SNR_RATIO` y `NOISE_FLOOR_MAX`
+son los del mic común, y `<NOMBRE>_ARRAY` los del array (`calibrate.py`
+escribe los del modo activo). Cambiar de mic = cambiar sólo `MIC_MODE`.
+Firmware de 6 canales, 16 kHz (verificado: viene así de fábrica):
 
 | Canal | Qué es | Para qué se usa |
 |---|---|---|
@@ -453,10 +458,16 @@ NET   ✓ enviado «vení para acá» (0.01s)
   transcribir, así que el fondo de la sala ni gasta Whisper. La referencia
   sigue a la persona (EMA por frase) y decir "rai" de nuevo la re-engancha a
   quien lo dijo. Log: `WAKE ✗ DESCARTADO más flojo que quien me llamó`.
-- Después queda despierto `WAKE_WINDOW_S` segundos para seguir la conversación
-  sin repetir el nombre. Cada frase aceptada renueva la ventana, y también la
-  renueva el `SPEAK_END` del orquestador (acaba de contestar: lo natural es que
-  le sigan hablando).
+- Uso pensado: «oye rai» → «Sí, dime» → la orden **enseguida**; el robot
+  contesta → la réplica **enseguida**. La ventana (`WAKE_WINDOW_S`, 6 s) es
+  corta a propósito y se cuenta desde que el robot **termina** de hablar
+  (`SPEAK_END`); mientras habla no corre (`SPEAK_START`). Si empezás a hablar
+  dentro de la ventana, no se cierra a mitad de frase. Después de mandar una
+  orden espera hasta `REPLY_WAIT_S` (12 s) a que el robot conteste, así la
+  latencia del LLM no lo duerme.
+- «Oye rai, sentate» de corrido también anda: si tras el disparo del spotter
+  seguís hablando (`WAKE_FOLLOW_SPEECH_MS` de voz en `WAKE_ACK_DECIDE_MS`), la
+  frase entera va a Whisper, se le saca el nombre y no se dice «Sí, dime».
 
 Desde `linux/.env`:
 
@@ -464,7 +475,8 @@ Desde `linux/.env`:
 WAKE_WORD_ENABLED=true    # false = como antes, atiende todo lo que pasa el VAD
 WAKE_MODE=audio           # audio | text
 WAKE_PHRASES=oye rai,oye ray,oye rey   # agregá "hola rai", "che rai"...
-WAKE_WINDOW_S=25
+WAKE_WINDOW_S=6     # ventana corta tras «Sí, dime» / tras cada respuesta
+REPLY_WAIT_S=12     # espera a que el robot conteste una orden
 ATTENTION_LEVEL_RATIO=0.25      # sin array: nivel mínimo relativo a la conversación; 0 = off
 ATTENTION_LEVEL_RATIO_ARRAY=0   # con array manda la dirección
 ```

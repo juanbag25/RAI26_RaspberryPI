@@ -43,11 +43,13 @@ from config import (
     NOISE_FLOOR_MAX,
     DOA_TOLERANCE_DEG,
     FRAME_MS,
+    MIC_MODE,
     RESPEAKER_ENABLED,
     RESPEAKER_PARAMS,
 )
 from doa import ang_diff, dominant_direction
 
+_PER_MIC_KEYS = ("RMS_THRESHOLD", "NEAR_RMS_THRESHOLD", "NEAR_SNR_RATIO", "NOISE_FLOOR_MAX")
 ENV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
 BIN_DEG = 15          # sectores de ruido: resolución del histograma
 SECTOR_MIN_SHARE = 0.12  # un bin es "ruido propio" si junta >= 12 % de las lecturas con voz
@@ -423,6 +425,10 @@ def main() -> int:
     if array:
         array.stop_polling()
 
+    # Los umbrales de nivel van por modo de mic (config.MIC_MODE): los del
+    # array se guardan con sufijo _ARRAY y no pisan los del mic común.
+    if MIC_MODE == "array":
+        values = {(f"{k}_ARRAY" if k in _PER_MIC_KEYS else k): v for k, v in values.items()}
     say()
     if values:
         say("Valores calibrados:")

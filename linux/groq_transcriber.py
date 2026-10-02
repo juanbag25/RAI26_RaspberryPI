@@ -4,8 +4,52 @@ import wave
 import numpy as np
 from groq import Groq
 
-from config import GROQ_MODEL, LANGUAGE, SAMPLE_RATE, STT_PROMPT
-from log import dim, err, warn
+from config import (
+    GROQ_MODEL,
+    LANGUAGE,
+    SAMPLE_RATE,
+    STT_HALLUCINATIONS,
+    STT_MAX_COMPRESSION,
+    STT_MAX_NO_SPEECH_PROB,
+    STT_MIN_LOGPROB,
+    STT_NO_SPEECH_LOGPROB,
+    STT_PROMPT,
+)
+from log import dim, drop, err, warn
+from wake_word import normalize
+
+# STT_HALLUCINATIONS: "*frase" = descartar si el texto la CONTIENE; sin "*",
+# sólo si el texto entero es eso.
+_HALLUCINATION_EXACT = {normalize(h) for h in STT_HALLUCINATIONS if not h.startswith("*")}
+_HALLUCINATION_SUBSTR = tuple(normalize(h[1:]) for h in STT_HALLUCINATIONS if h.startswith("*"))
+
+
+def _field(segment, name: str, default: float) -> float:
+    value = segment.get(name) if isinstance(segment, dict) else getattr(segment, name, None)
+    try:
+        return float(value) if value is not None else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _segment_rejection(segment) -> str | None:
+    """Por qué descartar este segmento de Whisper (None = se queda)."""
+    no_speech = _field(segment, "no_speech_prob", 0.0)
+    logprob = _field(segment, "avg_logprob", 0.0)
+    compression = _field(segment, "compression_ratio", 0.0)
+    if no_speech > STT_MAX_NO_SPEECH_PROB and logprob < STT_NO_SPEECH_LOGPROB:
+        return f"sin voz (no_speech={no_speech:.2f}, logprob={logprob:.2f})"
+    if logprob < STT_MIN_LOGPROB:
+        return f"poco probable (logprob={logprob:.2f})"
+    if compression > STT_MAX_COMPRESSION:
+        return f"repetitivo (compresión={compression:.1f})"
+    return None
+
+
+def is_known_hallucination(text: str) -> bool:
+    """Frases que Whisper inventa con silencio/ruido ("gracias por ver")."""
+    n = normalize(text)
+    return n in _HALLUCINATION_EXACT or any(h in n for h in _HALLUCINATION_SUBSTR)
 
 
 class GroqTranscriber:
@@ -38,8 +82,36 @@ class GroqTranscriber:
                 # el wake word) y alucina menos con audio flojo.
                 prompt=STT_PROMPT,
                 temperature=0.0,
+                # verbose_json trae la confianza de cada segmento
+                # (no_speech_prob, avg_logprob, compression_ratio).
+                response_format="verbose_json",
             )
-            return result.text.strip()
         except Exception as exc:
             err("STT", f"Groq falló ({type(exc).__name__}): {exc}")
             return ""
+        return self._filter(result)
+
+    @staticmethod
+    def _filter(result) -> str:
+        """Texto de los segmentos confiables. Sin segmentos (respuesta sin
+        verbose_json) se usa el texto tal cual."""
+        segments = getattr(result, "segments", None)
+        if segments is None:
+            segments = (getattr(result, "model_extra", None) or {}).get("segments")
+        if not segments:
+            text = (getattr(result, "text", "") or "").strip()
+        else:
+            kept = []
+            for segment in segments:
+                seg_text = (segment.get("text") if isinstance(segment, dict)
+                            else getattr(segment, "text", "")) or ""
+                why = _segment_rejection(segment)
+                if why:
+                    drop("STT", f"segmento descartado, {why}", texto=f"«{seg_text.strip()}»")
+                    continue
+                kept.append(seg_text)
+            text = "".join(kept).strip()
+        if text and is_known_hallucination(text):
+            drop("STT", "alucinación típica de Whisper", texto=f"«{text}»")
+            return ""
+        return text

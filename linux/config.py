@@ -31,6 +31,15 @@ def _env_str(name: str, default: str) -> str:
     return default if raw is None else raw.strip()
 
 
+def _env_mic_float(name: str, default: float, array_default: float) -> float:
+    """Knob de NIVEL que depende del mic: la escala del ReSpeaker (mics
+    crudos) es ~10 dB más baja que la del mic común, así que cada modo tiene
+    su valor. En modo array se lee `<NAME>_ARRAY`; en modo normal, `<NAME>`."""
+    if MIC_MODE == "array":
+        return _env_float(f"{name}_ARRAY", array_default)
+    return _env_float(name, default)
+
+
 def _env_list(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
     """Lista separada por comas en .env ("oye rai, oye ray")."""
     raw = os.getenv(name, "").strip()
@@ -42,6 +51,22 @@ def _env_list(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
 SAMPLE_RATE = 16000
 FRAME_MS = 30
 
+# --- Micrófono ----------------------------------------------------------------
+# "normal": mic USB común, mono, omnidireccional (default; el foco lo hacen el
+#           nivel y el wake word).
+# "array":  ReSpeaker USB Mic Array v2.0: foco por dirección (DoA), DSP del
+#           chip, LEDs. Ver "Mic array" más abajo.
+# Los umbrales de nivel (RMS_THRESHOLD, NEAR_RMS_THRESHOLD, NEAR_SNR_RATIO,
+# NOISE_FLOOR_MAX) tienen un valor por modo: en .env, el del array lleva el
+# sufijo _ARRAY (NEAR_RMS_THRESHOLD_ARRAY=...). Así se cambia de mic tocando
+# sólo MIC_MODE.
+MIC_MODE = _env_str("MIC_MODE", "normal").lower()
+if MIC_MODE not in ("normal", "array"):
+    warn("CONFIG", f"MIC_MODE={MIC_MODE!r} desconocido (normal|array): uso normal")
+    MIC_MODE = "normal"
+if os.getenv("RESPEAKER_ENABLED", "").strip():
+    warn("CONFIG", "RESPEAKER_ENABLED ya no se usa: elegí el mic con MIC_MODE=normal|array")
+
 # Backend STT: "local" (faster-whisper en CPU) o "groq" (Groq cloud API).
 BACKEND = "groq"
 
@@ -52,19 +77,53 @@ MODEL_SIZE = "small"
 COMPUTE_TYPE = "int8"
 
 # --- Backend groq ------------------------------------------------------------
-# Opciones: "whisper-large-v3", "whisper-large-v3-turbo"
+# Opciones: "whisper-large-v3" (más preciso en español y frases cortas) o
+# "whisper-large-v3-turbo" (decoder recortado: algo más rápido, menos preciso).
 # La API key se lee de la variable de entorno GROQ_API_KEY.
-GROQ_MODEL = "whisper-large-v3-turbo"
+GROQ_MODEL = _env_str("GROQ_MODEL", "whisper-large-v3")
 
 # --- Común -------------------------------------------------------------------
 LANGUAGE = "es"
 # Pista de vocabulario para Whisper (prompt / initial_prompt). Sirve para dos
 # cosas: que escriba "RAI" y no "rai/ray/rey" (importante para el wake word) y
 # que se sesgue al dominio en vez de alucinar.
-# Ojo: mantenerlo corto y SIN frases imperativas de ejemplo — con audio flojo
-# Whisper tiende a devolver el prompt tal cual, y un "RAI, vení" alucinado sería
-# un comando falso.
-STT_PROMPT = "Conversación en español con RAI, un perro robot del ITBA."
+# Además lleva el vocabulario de las órdenes que entiende el LLM server
+# (app/models.py: posturas, movimiento, waypoints): Whisper se sesga a
+# escribir "sentate" y no "sentarte/sé tate".
+# Ojo: mantenerlo corto, como LISTA de palabras y SIN frases imperativas de
+# ejemplo — con audio flojo Whisper tiende a devolver el prompt tal cual, y un
+# "RAI, vení" alucinado sería un comando falso. Un eco de >=4 palabras seguidas
+# del prompt se descarta (main.is_prompt_echo); el resto lo filtran las
+# métricas de confianza (STT_MAX_NO_SPEECH_PROB y compañía).
+STT_PROMPT = _env_str(
+    "STT_PROMPT",
+    "Conversación en español con RAI, un perro robot del ITBA. Vocabulario: "
+    "sentate, parate, levantate, caminá, avanzá, retrocedé, girá, frená, "
+    "saludá, izquierda, derecha, adelante, atrás, aula, ascensor, entrada.",
+)
+
+# --- Filtro de alucinaciones (métricas de Whisper por segmento) ----------------
+# Groq devuelve, con response_format=verbose_json, la confianza de cada
+# segmento. Se descarta un segmento si Whisper cree que no hubo voz
+# (no_speech_prob > STT_MAX_NO_SPEECH_PROB) y además no está seguro del texto
+# (avg_logprob < STT_NO_SPEECH_LOGPROB): el criterio estándar de Whisper.
+# También si el texto es muy poco probable (avg_logprob < STT_MIN_LOGPROB) o
+# repetitivo (compression_ratio > STT_MAX_COMPRESSION, "sí sí sí sí...").
+STT_MAX_NO_SPEECH_PROB = _env_float("STT_MAX_NO_SPEECH_PROB", 0.6)
+STT_NO_SPEECH_LOGPROB = _env_float("STT_NO_SPEECH_LOGPROB", -0.7)
+STT_MIN_LOGPROB = _env_float("STT_MIN_LOGPROB", -1.2)
+STT_MAX_COMPRESSION = _env_float("STT_MAX_COMPRESSION", 2.4)
+# Frases que Whisper inventa con silencio/ruido (vienen de los subtítulos con
+# los que se entrenó). Se comparan normalizadas (minúsculas, sin acentos ni
+# puntuación): si la frase entera es una de éstas, o CONTIENE una de las
+# marcadas con "*" al principio, se descarta.
+STT_HALLUCINATIONS = _env_list("STT_HALLUCINATIONS", (
+    "gracias por ver", "gracias por ver el video", "gracias por mirar",
+    "muchas gracias por ver", "suscribete", "no olvides suscribirte",
+    "musica", "aplausos", "risas",
+    "*amara org", "*subtitulos realizados por", "*subtitulado por",
+    "*suscribete al canal", "*dale like", "*gracias por ver el video",
+))
 
 # --- Control de mute (aviso del orquestador) ----------------------------------
 # Puerto donde este script escucha SPEAK_START / SPEAK_END del orquestador
@@ -88,6 +147,10 @@ SILERO_MODEL_NAME = _env_str("SILERO_MODEL_NAME", "silero_vad.onnx")
 # Sólo para VAD_ENGINE=webrtc (0-3).
 VAD_AGGRESSIVENESS = 3
 SILENCE_MS = 700
+# De los SILENCE_MS de silencio que cierran la frase, cuánto se manda a
+# Whisper. El resto se recorta: con cola larga de silencio/ruido Whisper
+# tiende a inventar un final ("gracias", "...y nada").
+TRAIL_SILENCE_KEEP_MS = int(_env_float("TRAIL_SILENCE_KEEP_MS", 250))
 # Para CERRAR una utterance cuenta como silencio todo frame que no sea voz
 # fuerte: webrtcvad solo, con ruido de fondo (ventiladores, motores, gente)
 # dice "voz" casi todo el tiempo y la frase queda abierta para siempre. Un
@@ -105,10 +168,15 @@ CONTINUE_LEVEL_RATIO = _env_float("CONTINUE_LEVEL_RATIO", 0.35)
 # Tope de duración de una utterance: pasado esto se cierra igual y se evalúa
 # (va a Groq si pasa el filtro). Red de seguridad por si el cierre no llega.
 MAX_UTTERANCE_MS = int(_env_float("MAX_UTTERANCE_MS", 12000))
-PRE_SPEECH_PADDING_MS = 200
+# Audio que se agrega ANTES de que el VAD abra. Con ONSET_SPEECH_FRAMES=3 el
+# onset ya ocupa 90 ms: con 350 quedan ~260 ms para consonantes flojas del
+# arranque ("s", "f", "p") que no llegan al umbral.
+PRE_SPEECH_PADDING_MS = int(_env_float("PRE_SPEECH_PADDING_MS", 350))
 # Duración mínima de voz real dentro de una utterance para enviarla a Whisper.
-# Descarta falsos positivos cortos que suelen alucinar "gracias", etc.
-MIN_UTTERANCE_MS = int(_env_float("MIN_UTTERANCE_MS", 400))
+# Descarta golpes y falsos positivos cortos. 300 deja pasar un "sí"/"no"
+# (respuestas cortas en la ventana de conversación); las alucinaciones las
+# frena el filtro de confianza de arriba.
+MIN_UTTERANCE_MS = int(_env_float("MIN_UTTERANCE_MS", 300))
 
 # --- Foco del micrófono: rechazo de campo lejano -------------------------------
 # El mic es omnidireccional: sin filtro, una charla del otro lado de la sala
@@ -118,16 +186,18 @@ MIN_UTTERANCE_MS = int(_env_float("MIN_UTTERANCE_MS", 400))
 # cerrarla (sobre el nivel real de toda la utterance).
 #
 # Piso absoluto para abrir una utterance (audio normalizado [-1, 1]).
-RMS_THRESHOLD = _env_float("RMS_THRESHOLD", 0.02)
+# (Éste y los tres siguientes van por modo de mic: en modo array se leen con
+# sufijo _ARRAY, ver MIC_MODE.)
+RMS_THRESHOLD = _env_mic_float("RMS_THRESHOLD", 0.02, 0.025)
 # Knob PRINCIPAL: nivel que la utterance tiene que alcanzar (percentil 90 de
 # sus frames de voz) para contar como "de cerca". Subilo si sigue entrando
 # gente de lejos; bajalo si el robot te ignora a vos.
 # Calibralo con `python mic_level.py` (imprime p10/p90 y un valor sugerido).
-NEAR_RMS_THRESHOLD = _env_float("NEAR_RMS_THRESHOLD", 0.055)
+NEAR_RMS_THRESHOLD = _env_mic_float("NEAR_RMS_THRESHOLD", 0.055, 0.025)
 # Además del umbral absoluto: la voz tiene que estar este factor por encima del
 # piso de ruido medido en vivo (el murmullo de fondo sube ese piso, así que en
 # una sala ruidosa el filtro se endurece solo).
-NEAR_SNR_RATIO = _env_float("NEAR_SNR_RATIO", 3.0)
+NEAR_SNR_RATIO = _env_mic_float("NEAR_SNR_RATIO", 3.0, 1.0)
 # Frames de voz fuerte CONSECUTIVOS para abrir una utterance (30 ms c/u): evita
 # que un golpe o una sílaba lejana abran la ventana.
 ONSET_SPEECH_FRAMES = int(_env_float("ONSET_SPEECH_FRAMES", 3))
@@ -139,7 +209,7 @@ NOISE_FLOOR_ALPHA = 0.05
 # 0.05 deja que el umbral para abrir llegue a 0.05 × NEAR_SNR_RATIO = 0.15.
 # Ojo: con ese ruido hay que hablarle más fuerte/cerca; si te ignora caminando,
 # bajá NEAR_SNR_RATIO (2) antes que este tope.
-NOISE_FLOOR_MAX = _env_float("NOISE_FLOOR_MAX", 0.05)
+NOISE_FLOOR_MAX = _env_mic_float("NOISE_FLOOR_MAX", 0.05, 0.05)
 # Además el piso se estima SIEMPRE (también con una frase abierta) como el
 # percentil 10 del RMS de esta ventana: al hablar siempre hay pausas, así que
 # ese mínimo es el ruido. Sin esto, un ruido que arranca de golpe (el robot
@@ -147,14 +217,14 @@ NOISE_FLOOR_MAX = _env_float("NOISE_FLOOR_MAX", 0.05)
 NOISE_WINDOW_MS = int(_env_float("NOISE_WINDOW_MS", 2000))
 
 # --- Mic array: ReSpeaker USB Mic Array v2.0 (XVF-3000) -----------------------
-# Si está conectado se usa solo (si no, el mic mono de siempre). Firmware de 6
+# Sólo con MIC_MODE=array (si no está conectado, cae al mic mono). Firmware de 6
 # canales: ch0 = audio procesado por el chip (beamforming + supresión de ruido
 # + AGC) -> va al spotter y a Whisper; ch1-4 = mics crudos -> de ahí sale el
 # NIVEL que usa el filtro de cercanía de vad.py, porque el AGC de ch0 levanta
 # a la gente lejana (medido: ganancia 2-5x en 20 s) y rompería ese filtro.
 # Ojo: la escala del nivel crudo es ~10 dB más baja que la de ch0 y que la
-# del mic viejo: recalibrar NEAR_RMS_THRESHOLD con `python mic_level.py`.
-RESPEAKER_ENABLED = _env_bool("RESPEAKER_ENABLED", True)
+# del mic común: por eso los umbrales de nivel tienen su variante _ARRAY.
+RESPEAKER_ENABLED = MIC_MODE == "array"
 # Parámetros del DSP que se fijan en cada arranque (el chip los olvida al
 # cortarle la alimentación). `python respeaker.py` lista todos. Se pueden
 # pisar desde .env: RESPEAKER_PARAMS=AGCMAXGAIN=10,HPFONOFF=2
@@ -165,7 +235,10 @@ _RESPEAKER_DEFAULT_PARAMS = {
     # Pasa-altos 125 Hz: corta retumbe de motores/pasos sin tocar la voz.
     "HPFONOFF": 2,
     "STATNOISEONOFF": 1,      # ventiladores y ruido estacionario
-    "NONSTATNOISEONOFF": 1,   # ruido no estacionario
+    # Ruido no estacionario: apagado. Su supresión mete artefactos ("voz de
+    # robot", sílabas comidas) que a Whisper le molestan más que el ruido.
+    # Volver a 1 con RESPEAKER_PARAMS=NONSTATNOISEONOFF=1 si el fondo pesa más.
+    "NONSTATNOISEONOFF": 0,
     "AGCONOFF": 1,
 }
 
@@ -273,10 +346,24 @@ WAKE_WORDS = (
 # Sólo se busca el nombre en las primeras N palabras de la frase: "rai vení" sí,
 # "el otro día en la clase de rai..." no.
 WAKE_SEARCH_WORDS = int(_env_float("WAKE_SEARCH_WORDS", 3))
-# Ventana de conversación en segundos: tras despertarlo, cuánto tiempo se le
-# puede seguir hablando sin volver a decir "rai". Cada frase aceptada —y cada
-# respuesta hablada del robot— la renueva.
-WAKE_WINDOW_S = _env_float("WAKE_WINDOW_S", 25.0)
+# Ventana de conversación en segundos, CORTA a propósito: el uso es «oye rai»
+# -> «Sí, dime» -> la orden enseguida; y cuando el robot contesta, la réplica
+# enseguida. La ventana se cuenta desde que el robot TERMINA de hablar (el
+# SPEAK_END del «Sí, dime» o de la respuesta) y mientras habla no corre. Si
+# empezás a hablar dentro de la ventana, no se cierra a mitad de frase.
+WAKE_WINDOW_S = _env_float("WAKE_WINDOW_S", 6.0)
+# Después de mandarle una orden al orquestador: cuánto se espera a que el
+# robot empiece a contestar (LLM + TTS) sin dormirse. Si contesta, al terminar
+# de hablar vuelve a correr WAKE_WINDOW_S; si la orden fue sólo movimiento
+# (no habla), a los REPLY_WAIT_S se duerme.
+REPLY_WAIT_S = _env_float("REPLY_WAIT_S", 12.0)
+# «Oye rai» seguido de la orden sin pausa ("oye rai, sentate"): tras el
+# disparo del spotter se mira WAKE_ACK_DECIDE_MS si la persona sigue
+# hablando. Si en ese lapso hubo >= WAKE_FOLLOW_SPEECH_MS de voz, la frase
+# entera (con el «oye rai») va a Whisper y NO se dice «Sí, dime» (la respuesta
+# es la confirmación). Si no, «Sí, dime» y se espera la orden.
+WAKE_ACK_DECIDE_MS = int(_env_float("WAKE_ACK_DECIDE_MS", 400))
+WAKE_FOLLOW_SPEECH_MS = int(_env_float("WAKE_FOLLOW_SPEECH_MS", 210))
 # Si la frase es SÓLO el nombre ("rai"), qué mandarle al orquestador como
 # turno. Por defecto nada: el orquestador ya contesta «Sí, dime» al evento
 # `awake`.

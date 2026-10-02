@@ -11,10 +11,12 @@ se compara contra WAKE_WORDS en las primeras WAKE_SEARCH_WORDS palabras — más
 la concatenación de esas palabras, que rescata el "R.A.I." -> "r a i" -> "rai"
 que a veces devuelve Whisper.
 
-Una vez despierto queda una ventana de WAKE_WINDOW_S segundos para seguir la
-charla sin repetir el nombre; cada frase aceptada la renueva, y también la
-renueva el SPEAK_END del orquestador (recién terminó de contestar: lo natural
-es que le sigan hablando).
+Una vez despierto queda una ventana CORTA de WAKE_WINDOW_S segundos para
+seguir la charla sin repetir el nombre. La ventana no corre mientras el robot
+habla (SPEAK_START -> `hold`) y vuelve a empezar cuando termina (SPEAK_END ->
+`refresh`): «Sí, dime» -> la orden enseguida; respuesta -> la réplica
+enseguida. Tras mandar una orden se espera hasta REPLY_WAIT_S a que el robot
+empiece a contestar (`await_reply`), así la latencia del LLM no lo duerme.
 
 Atención: despertarse no es "escuchar todo lo que pase el VAD durante N
 segundos" sino "prestarle atención a QUIEN me llamó". Con el ReSpeaker eso lo
@@ -40,6 +42,8 @@ from log import dim, drop, fmt, ok
 from config import (
     ATTENTION_FOLLOW_ALPHA,
     ATTENTION_LEVEL_RATIO,
+    MUTE_TIMEOUT_S,
+    REPLY_WAIT_S,
     WAKE_ACK_TEXT,
     WAKE_SEARCH_WORDS,
     WAKE_WINDOW_S,
@@ -48,6 +52,10 @@ from config import (
 )
 
 _PUNCT_KEEP = "0123456789abcdefghijklmnopqrstuvwxyz "
+# Cómo transcribe Whisper el "rai" de un «oye rai» que el spotter ya
+# confirmó. NO están en WAKE_WORDS porque, para despertar por texto, "rey"
+# suelto daría falsos positivos.
+_WAKE_LOOKALIKES = {"rey", "rei", "rail"}
 
 
 def normalize(text: str) -> str:
@@ -85,6 +93,29 @@ class WakeWord:
             if time.monotonic() < self._awake_until:
                 self._awake_until = time.monotonic() + WAKE_WINDOW_S
 
+    def hold(self) -> None:
+        """El robot empezó a hablar (SPEAK_START): mientras habla la ventana
+        no corre. Si el SPEAK_END se pierde, el mute expira a MUTE_TIMEOUT_S y
+        llama a refresh(); el margen extra es por si eso tarda."""
+        with self._lock:
+            now = time.monotonic()
+            if now < self._awake_until:
+                self._awake_until = max(self._awake_until,
+                                        now + MUTE_TIMEOUT_S + WAKE_WINDOW_S)
+
+    def await_reply(self) -> None:
+        """Se le mandó una orden al orquestador: no dormirse mientras el LLM
+        piensa y el TTS sintetiza (si contesta, hold/refresh toman la posta)."""
+        with self._lock:
+            now = time.monotonic()
+            if now < self._awake_until:
+                self._awake_until = max(self._awake_until, now + REPLY_WAIT_S)
+
+    def announce(self) -> None:
+        """Pedir el «Sí, dime» de un wake ya abierto (ver wake_from_audio)."""
+        with self._lock:
+            self._wake_seq += 1
+
     def _renew(self) -> None:
         with self._lock:
             self._awake_until = time.monotonic() + WAKE_WINDOW_S
@@ -114,13 +145,15 @@ class WakeWord:
                 self._focus_level = ((1.0 - ATTENTION_FOLLOW_ALPHA) * self._focus_level
                                      + ATTENTION_FOLLOW_ALPHA * level)
 
-    def wake_from_audio(self) -> None:
+    def wake_from_audio(self, *, announce: bool = True) -> None:
         """El spotter de audio (wake_spotter.py) reconoció la frase de wake.
 
         Abre (o reinicia) la ventana. La referencia de nivel queda vacía: el
         «oye rai» suele decirse más fuerte que la instrucción que sigue.
+        `announce=False`: el «Sí, dime» lo decide main.py un instante después
+        (si la persona siguió hablando, no hace falta) con `announce()`.
         """
-        self._wake_new()
+        self._wake_new(announce=announce)
         ok("WAKE", f"DESPIERTO por audio, ventana {WAKE_WINDOW_S:.0f}s")
 
     def sleep(self) -> None:
@@ -178,6 +211,24 @@ class WakeWord:
             if "".join(head[:end]) in self._words:
                 return end - 1
         return None
+
+    def strip_wake(self, text: str) -> str:
+        """Saca el «oye rai» del principio de una frase que se sabe que
+        empezó con él (el spotter lo oyó y la persona siguió hablando).
+
+        Más permisivo que `_find`: acá ya se sabe que el nombre está, así que
+        también vale "rey"/"rei" (Whisper oye así "rai"). Si no encuentra el
+        nombre, deja el texto como está.
+        """
+        words, owners = self._tokenize(text)
+        names = self._words | _WAKE_LOOKALIKES
+        cut = None
+        for i, word in enumerate(words[:4]):
+            if word in names:
+                cut = i
+        if cut is None:
+            return text.strip()
+        return " ".join(text.split()[owners[cut] + 1:]).lstrip(" ,.;:-—").strip()
 
     def filter(self, text: str, level: float = 0.0) -> str | None:
         """Qué mandarle al orquestador para esta transcripción.

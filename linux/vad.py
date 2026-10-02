@@ -55,6 +55,7 @@ from config import (
     RMS_THRESHOLD,
     SAMPLE_RATE,
     SILENCE_MS,
+    TRAIL_SILENCE_KEEP_MS,
     SILERO_MODEL_PATH,
     SILERO_THRESHOLD,
     VAD_AGGRESSIVENESS,
@@ -104,6 +105,7 @@ class VoiceActivityDetector:
         padding_frames = max(1, PRE_SPEECH_PADDING_MS // FRAME_MS)
         self._pre_buffer: deque[bytes] = deque(maxlen=padding_frames)
         self._silence_frames_to_close = max(1, SILENCE_MS // FRAME_MS)
+        self._trail_keep_frames = max(0, TRAIL_SILENCE_KEEP_MS // FRAME_MS)
         self._min_speech_frames = max(1, MIN_UTTERANCE_MS // FRAME_MS)
         self._max_utterance_frames = max(1, MAX_UTTERANCE_MS // FRAME_MS)
         self._noise_floor = NOISE_FLOOR_INIT
@@ -155,6 +157,25 @@ class VoiceActivityDetector:
         self._speech_frame_count = 0
         self._speech_levels: list[float] = []
         self._onset_count = 0
+        # Frames de voz que llevaba la utterance cuando se llamó a mark()
+        # (None = sin marca). Ver speech_ms_since_mark().
+        self._mark_speech_frames: int | None = None
+
+    def mark(self) -> bool:
+        """Marca el punto actual de la utterance ABIERTA (lo usa main.py al
+        oír «oye rai»: lo que venga después es la orden). False si no hay
+        utterance abierta."""
+        if not self._in_speech:
+            return False
+        self._mark_speech_frames = self._speech_frame_count
+        return True
+
+    def speech_ms_since_mark(self) -> int:
+        """Voz (ms, frames que mantienen la frase abierta) desde mark(). 0 si
+        no hay marca o la utterance ya se cerró."""
+        if not self._in_speech or self._mark_speech_frames is None:
+            return 0
+        return (self._speech_frame_count - self._mark_speech_frames) * FRAME_MS
 
     @property
     def noise_floor(self) -> float:
@@ -312,7 +333,14 @@ class VoiceActivityDetector:
         self._noise_floor = min(floor, NOISE_FLOOR_MAX)
 
     def _finalize_utterance(self) -> np.ndarray:
-        raw = b"".join(self._utterance)
+        # La frase cierra tras SILENCE_MS de "silencio" (o ruido que no llega
+        # a voz): de esa cola sólo se manda TRAIL_SILENCE_KEEP_MS. Una cola
+        # larga es donde Whisper inventa finales.
+        frames = self._utterance
+        excess = self._silence_count - self._trail_keep_frames
+        if excess > 0:
+            frames = frames[:-excess]
+        raw = b"".join(frames)
         samples = np.frombuffer(raw, dtype=np.int16)
         return samples.astype(np.float32) / 32768.0
 
