@@ -225,8 +225,14 @@ frase lo esté. Una frase con menos de `DOA_MIN_SAMPLES` lecturas no se juzga
 **Automática (recomendada):**
 
 ```bash
-python linux/calibrate.py            # --dry-run para sólo mirar, --yes para no confirmar
+./calibrate_stt.sh                   # --dry-run para sólo mirar, --yes para no confirmar
 ```
+
+`calibrate_stt.sh` (raíz del repo) frena el servicio `rai26-stt` —que tiene
+el mic abierto: dos procesos no pueden usar el ReSpeaker a la vez—, corre
+`linux/calibrate.py` con la venv (`.venv/bin/python`; el `python` del sistema
+no tiene las dependencias) y vuelve a levantar el servicio al terminar, aunque
+se cancele. Pide la clave de `sudo` para frenar/levantar el servicio.
 
 Te va diciendo qué hacer en 6 pasos de ~10 s (cualquiera se saltea con «s»):
 ambiente con el robot prendido y nadie hablando, robot caminando, robot
@@ -237,7 +243,7 @@ hablando, vos de frente a ~1 m, alguien hablando desde el fondo, y «oye rai»
 `NEAR_RMS_THRESHOLD`, `RMS_THRESHOLD`, `NEAR_SNR_RATIO` y `NOISE_FLOOR_MAX`.
 Avisa si algo salió raro (alguien habló en un paso de silencio, cerca y lejos
 suenan parecido, el spotter no reconoce el «oye rai»). Sin ReSpeaker calibra
-sólo los niveles. Reiniciá `main.py` después.
+sólo los niveles.
 
 **A mano**, si querés ver los números en vivo:
 

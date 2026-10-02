@@ -4,7 +4,8 @@ Va diciendo qué hacer en cada paso, mide, y al final escribe los valores en
 `linux/.env` (con backup del anterior y confirmación). Correrlo con el array
 YA MONTADO en el robot y en la sala real: los ángulos y ruidos dependen de eso.
 
-    python calibrate.py              # interactivo
+    ./calibrate_stt.sh               # en la Pi: frena el servicio, calibra, lo levanta
+    python calibrate.py              # interactivo (con la venv y el mic libre)
     python calibrate.py --dry-run    # mide y muestra, no escribe .env
     python calibrate.py --yes        # no pregunta antes de guardar
 
@@ -53,6 +54,24 @@ SECTOR_PAD_DEG = 10
 
 
 # --------------------------------------------------------------------------- IO
+
+def other_listener() -> str | None:
+    """¿Otro proceso del STT (python main.py) tiene el mic abierto? Dos
+    procesos no pueden abrir el ReSpeaker a la vez: el segundo ni lo ve."""
+    me = os.getpid()
+    for pid in filter(str.isdigit, os.listdir("/proc")):
+        if int(pid) == me:
+            continue
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as fh:
+                argv = [a.decode(errors="replace") for a in fh.read().split(b"\0") if a]
+        except OSError:
+            continue
+        if (argv and os.path.basename(argv[0]).startswith("python")
+                and any(os.path.basename(a) == "main.py" for a in argv[1:])):
+            return f"PID {pid}: {' '.join(argv)}"
+    return None
+
 
 def say(msg: str = "") -> None:
     print(msg, flush=True)
@@ -187,6 +206,12 @@ def main() -> int:
 
     say("CALIBRACIÓN DEL MIC DE RAI")
     say("Hacelo con el mic montado en el robot, en la sala donde va a trabajar.")
+    busy = other_listener()
+    if busy:
+        say(f"\n✖ El STT está corriendo y tiene el mic abierto: {busy}")
+        say("  Usá ./calibrate_stt.sh (frena el servicio, calibra y lo vuelve a levantar),")
+        say("  o a mano: sudo systemctl stop rai26-stt  ...  sudo systemctl start rai26-stt")
+        return 1
     capture = LinuxAudioCapture(device_id=args.device)
     array = None
     if capture.is_array and RESPEAKER_ENABLED:
@@ -412,8 +437,14 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    import sounddevice as sd
     try:
         sys.exit(main())
+    except sd.PortAudioError as exc:
+        say(f"\n✖ No pude abrir el mic: {exc}")
+        say("  ¿Está conectado (`arecord -l`)? ¿Lo tiene abierto otro programa (main.py,")
+        say("  el servicio rai26-stt)? Usá ./calibrate_stt.sh. No guardé nada.")
+        sys.exit(1)
     except KeyboardInterrupt:
         say("\nCancelado: no guardé nada.")
         sys.exit(130)
