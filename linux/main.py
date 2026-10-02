@@ -720,6 +720,10 @@ def main() -> None:
 
     except KeyboardInterrupt:
         info("MAIN", "Stopped.")
+    finally:
+        if array is not None:
+            array.stop_polling()
+            array.leds_off()
 
 
 if __name__ == "__main__":

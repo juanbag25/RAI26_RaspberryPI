@@ -222,6 +222,25 @@ frase lo esté. Una frase con menos de `DOA_MIN_SAMPLES` lecturas no se juzga
 
 ### Calibración en el robot (montado, en el lugar donde trabaja)
 
+**Automática (recomendada):**
+
+```bash
+python linux/calibrate.py            # --dry-run para sólo mirar, --yes para no confirmar
+```
+
+Te va diciendo qué hacer en 6 pasos de ~10 s (cualquiera se saltea con «s»):
+ambiente con el robot prendido y nadie hablando, robot caminando, robot
+hablando, vos de frente a ~1 m, alguien hablando desde el fondo, y «oye rai»
+3 veces. Con eso calcula y escribe en `linux/.env` (backup del anterior en
+`.env.bak-<fecha>`, gitignoreado): `DOA_FORWARD_OFFSET_DEG`,
+`DOA_BLOCKED_SECTORS`, `DOA_SPEAKER_SECTOR`, `DOA_MIN_IN_FOCUS`,
+`NEAR_RMS_THRESHOLD`, `RMS_THRESHOLD`, `NEAR_SNR_RATIO` y `NOISE_FLOOR_MAX`.
+Avisa si algo salió raro (alguien habló en un paso de silencio, cerca y lejos
+suenan parecido, el spotter no reconoce el «oye rai»). Sin ReSpeaker calibra
+sólo los niveles. Reiniciá `main.py` después.
+
+**A mano**, si querés ver los números en vivo:
+
 ```bash
 python linux/mic_level.py --doa
 ```

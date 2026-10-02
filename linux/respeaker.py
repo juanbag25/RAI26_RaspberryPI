@@ -215,7 +215,12 @@ class ReSpeaker:
         self._poller.start()
 
     def stop_polling(self) -> None:
+        """Frena el hilo y espera a que termine la lectura en curso (si no, al
+        salir del proceso pyusb libera el dispositivo bajo sus pies)."""
         self._running.clear()
+        if self._poller is not None:
+            self._poller.join(timeout=1.0)
+            self._poller = None
 
     def _poll(self, hz: float) -> None:
         period = 1.0 / hz if hz > 0 else 0.0
