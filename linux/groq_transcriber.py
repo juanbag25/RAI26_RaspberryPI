@@ -1,4 +1,5 @@
 import io
+import math
 import wave
 
 import numpy as np
@@ -63,7 +64,7 @@ class GroqTranscriber:
         self._client = Groq()
         dim("STT", f"groq {GROQ_MODEL} ({LANGUAGE})")
 
-    def transcribe(self, audio_np: np.ndarray) -> str:
+    def transcribe(self, audio_np: np.ndarray) -> tuple[str, float]:
         try:
             buf = io.BytesIO()
             with wave.open(buf, "wb") as wav:
@@ -83,21 +84,31 @@ class GroqTranscriber:
                 prompt=STT_PROMPT,
                 temperature=0.0,
                 # verbose_json trae la confianza de cada segmento
-                # (no_speech_prob, avg_logprob, compression_ratio).
+                # (no_speech_prob, avg_logprob, compression_ratio): se usa acá
+                # para filtrar segmentos poco confiables del texto, y además
+                # para armar un stt_confidence agregado que viaja hasta el
+                # orchestrator (ver _confidence).
                 response_format="verbose_json",
             )
         except Exception as exc:
             err("STT", f"Groq falló ({type(exc).__name__}): {exc}")
-            return ""
-        return self._filter(result)
+            return "", 0.0
+        text = self._filter(result)
+        stt_confidence = self._confidence(result)
+        return text, stt_confidence
+
+    @staticmethod
+    def _segments_of(result) -> list:
+        segments = getattr(result, "segments", None)
+        if segments is None:
+            segments = (getattr(result, "model_extra", None) or {}).get("segments")
+        return segments or []
 
     @staticmethod
     def _filter(result) -> str:
         """Texto de los segmentos confiables. Sin segmentos (respuesta sin
         verbose_json) se usa el texto tal cual."""
-        segments = getattr(result, "segments", None)
-        if segments is None:
-            segments = (getattr(result, "model_extra", None) or {}).get("segments")
+        segments = GroqTranscriber._segments_of(result)
         if not segments:
             text = (getattr(result, "text", "") or "").strip()
         else:
@@ -115,3 +126,16 @@ class GroqTranscriber:
             drop("STT", "alucinación típica de Whisper", texto=f"«{text}»")
             return ""
         return text
+
+    @staticmethod
+    def _confidence(result) -> float:
+        """Confianza del utterance completo (antes de filtrar segmentos): el
+        peor segmento de Whisper, convertido de log-prob a un score 0-1. Se
+        calcula sobre TODOS los segmentos (no sólo los que `_filter` termina
+        conservando) a propósito: un segmento con voces superpuestas/ruido ya
+        viene con avg_logprob bajo, así que lo "ve" acá aunque `_filter` lo
+        descarte del texto final — es justo la señal que se quiere mandar."""
+        segments = GroqTranscriber._segments_of(result)
+        if not segments:
+            return 0.0
+        return min(math.exp(_field(segment, "avg_logprob", 0.0)) for segment in segments)

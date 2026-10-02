@@ -29,9 +29,9 @@ def main() -> None:
         for frame in capture.frames():
             closed, audio = vad.process_frame(frame)
             if closed and audio is not None:
-                text = transcriber.transcribe(audio)
+                text, stt_confidence = transcriber.transcribe(audio)
                 if text:
-                    print(f">>> {text}")
+                    print(f">>> {text}  (confianza={stt_confidence:.2f})")
     except KeyboardInterrupt:
         print("\nStopped.")
 

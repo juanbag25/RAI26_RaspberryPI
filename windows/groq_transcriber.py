@@ -1,4 +1,5 @@
 import io
+import math
 import sys
 import wave
 
@@ -12,7 +13,7 @@ class GroqTranscriber:
     def __init__(self) -> None:
         self._client = Groq()
 
-    def transcribe(self, audio_np: np.ndarray) -> str:
+    def transcribe(self, audio_np: np.ndarray) -> tuple[str, float]:
         try:
             buf = io.BytesIO()
             with wave.open(buf, "wb") as wav:
@@ -27,8 +28,17 @@ class GroqTranscriber:
                 file=("audio.wav", buf.read()),
                 model=GROQ_MODEL,
                 language=LANGUAGE,
+                response_format="verbose_json",
             )
-            return result.text.strip()
+            text = result.text.strip()
+            # segments[] viene como lista de dicts (no objetos): confirmado
+            # contra la respuesta real del SDK groq 1.7.0.
+            segments = result.segments or []
+            stt_confidence = (
+                min(math.exp(seg["avg_logprob"]) for seg in segments)
+                if segments else 0.0
+            )
+            return text, stt_confidence
         except Exception as exc:
             print(f"Groq transcription error: {exc}", file=sys.stderr)
-            return ""
+            return "", 0.0

@@ -1,3 +1,4 @@
+import json
 import os
 import queue
 import socket
@@ -139,6 +140,17 @@ def send_to_orchestrator(text: str, ip: str, port: int, *, quiet: bool = False) 
 # -----------------------------
 
 
+def send_transcript_to_orchestrator(
+    text: str, stt_confidence: float, ip: str, port: int, *, quiet: bool = False
+) -> bool:
+    """Envuelve una transcripción (texto + confianza del STT) en JSON y la
+    manda por el mismo canal que `send_to_orchestrator`. Los eventos de wake
+    (`ORCH_EVENT_PREFIX`) NO pasan por acá: siguen yendo como string plano,
+    que es como el orquestador los distingue de una transcripción."""
+    payload = json.dumps({"text": text, "stt_confidence": stt_confidence})
+    return send_to_orchestrator(payload, ip, port, quiet=quiet)
+
+
 class Counters:
     """Totales del proceso, para el heartbeat."""
 
@@ -203,7 +215,7 @@ def transcribe_worker(
             warn("STT", f"{pending} utterances esperando en cola (Groq lento?)")
         dbg(f"transcribiendo {seconds:.1f}s de audio...", "STT")
         t0 = time.monotonic()
-        text = transcriber.transcribe(audio)
+        text, stt_confidence = transcriber.transcribe(audio)
         elapsed = time.monotonic() - t0
         counters.transcribed += 1
         if not text:
@@ -211,7 +223,7 @@ def transcribe_worker(
             drop("STT", "Groq no devolvió texto (error arriba, o audio inaudible)",
                  audio_s=f"{seconds:.1f}", nivel=level)
             continue
-        info("STT", f"«{text}» ({elapsed:.2f}s)")
+        info("STT", f"«{text}» ({elapsed:.2f}s, confianza={stt_confidence:.2f})")
         if is_prompt_echo(text):
             drop("STT", "eco del prompt de Whisper: es ruido, no habló nadie")
             continue
@@ -225,7 +237,9 @@ def transcribe_worker(
         # Wake word: hasta que lo llamen por su nombre, no sale nada de acá.
         payload = wake.filter(text, level)
         if payload:
-            if send_to_orchestrator(payload, orchestrator_ip, orchestrator_port):
+            if send_transcript_to_orchestrator(
+                payload, stt_confidence, orchestrator_ip, orchestrator_port
+            ):
                 counters.sent += 1
                 # No dormirse mientras el robot piensa la respuesta.
                 wake.await_reply()
