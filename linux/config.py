@@ -134,6 +134,83 @@ NOISE_FLOOR_MAX = _env_float("NOISE_FLOOR_MAX", 0.05)
 # empieza a caminar) abre una frase antes de que el piso lo aprenda.
 NOISE_WINDOW_MS = int(_env_float("NOISE_WINDOW_MS", 2000))
 
+# --- Mic array: ReSpeaker USB Mic Array v2.0 (XVF-3000) -----------------------
+# Si está conectado se usa solo (si no, el mic mono de siempre). Firmware de 6
+# canales: ch0 = audio procesado por el chip (beamforming + supresión de ruido
+# + AGC) -> va al spotter y a Whisper; ch1-4 = mics crudos -> de ahí sale el
+# NIVEL que usa el filtro de cercanía de vad.py, porque el AGC de ch0 levanta
+# a la gente lejana (medido: ganancia 2-5x en 20 s) y rompería ese filtro.
+# Ojo: la escala del nivel crudo es ~10 dB más baja que la de ch0 y que la
+# del mic viejo: recalibrar NEAR_RMS_THRESHOLD con `python mic_level.py`.
+RESPEAKER_ENABLED = _env_bool("RESPEAKER_ENABLED", True)
+# Parámetros del DSP que se fijan en cada arranque (el chip los olvida al
+# cortarle la alimentación). `python respeaker.py` lista todos. Se pueden
+# pisar desde .env: RESPEAKER_PARAMS=AGCMAXGAIN=10,HPFONOFF=2
+_RESPEAKER_DEFAULT_PARAMS = {
+    # Sin referencia de parlante (el parlante está en la Jetson) el AEC no
+    # tiene qué restar: apagado para que no meta artefactos.
+    "ECHOONOFF": 0,
+    # Pasa-altos 125 Hz: corta retumbe de motores/pasos sin tocar la voz.
+    "HPFONOFF": 2,
+    "STATNOISEONOFF": 1,      # ventiladores y ruido estacionario
+    "NONSTATNOISEONOFF": 1,   # ruido no estacionario
+    "AGCONOFF": 1,
+}
+
+
+def _env_params(name: str, default: dict[str, float]) -> dict[str, float]:
+    params = dict(default)
+    for item in _env_str(name, "").split(","):
+        key, sep, value = item.partition("=")
+        if not sep:
+            continue
+        try:
+            params[key.strip().upper()] = float(value)
+        except ValueError:
+            warn("CONFIG", f"{name}: {item!r} no es NOMBRE=número, lo ignoro")
+    return params
+
+
+RESPEAKER_PARAMS = _env_params("RESPEAKER_PARAMS", _RESPEAKER_DEFAULT_PARAMS)
+# Lecturas de DoA por segundo (cada una son 2 consultas USB, ~2-25 ms).
+DOA_POLL_HZ = _env_float("DOA_POLL_HZ", 20)
+# Brillo del anillo de LEDs (0-31). Despierto: el firmware ilumina hacia la
+# voz; dormido: apagado.
+RESPEAKER_LED_BRIGHTNESS = int(_env_float("RESPEAKER_LED_BRIGHTNESS", 8))
+
+# --- Foco espacial (DoA) ----------------------------------------------------------
+# Al despertar, el robot fija la dirección de quien dijo «oye rai» y, mientras
+# dure la ventana, sólo atiende frases que vengan de ahí (doa.py). Medido: con
+# voz, ~2/3 de las lecturas caen sobre la persona y ~1/3 son reflexiones; por
+# eso se exige una FRACCIÓN de lecturas en foco y no que toda la frase lo esté.
+#
+# Cuánto puede apartarse una lectura del foco y seguir contando como "en foco".
+DOA_TOLERANCE_DEG = _env_float("DOA_TOLERANCE_DEG", 35)
+# Fracción mínima de lecturas con voz dentro del foco para aceptar la frase.
+# Bajala si el robot ignora al que lo llamó; subila si entran otras voces.
+DOA_MIN_IN_FOCUS = _env_float("DOA_MIN_IN_FOCUS", 0.4)
+# Con menos lecturas con voz que esto, la dirección no decide (se acepta):
+# una frase cortita no se pierde por falta de datos.
+DOA_MIN_SAMPLES = int(_env_float("DOA_MIN_SAMPLES", 4))
+# Ancho del bin del histograma de direcciones (grados).
+DOA_BIN_DEG = _env_float("DOA_BIN_DEG", 15)
+# El foco sigue a la persona si se mueve (EMA circular por frase aceptada).
+DOA_FOLLOW_ALPHA = _env_float("DOA_FOLLOW_ALPHA", 0.3)
+# Ángulo del chip que corresponde al FRENTE del robot: lo que se resta para
+# loguear/avisar en el marco del robot. Calibrar con `python mic_level.py --doa`
+# hablándole de frente.
+DOA_FORWARD_OFFSET_DEG = _env_float("DOA_FORWARD_OFFSET_DEG", 0)
+# Sectores (marco del robot) donde hay ruido propio fijo: ventiladores,
+# motores. Frases que vienen mayormente de ahí se descartan siempre. Formato
+# "desde-hasta" separados por coma, cruzar 0° vale: "170-200,350-10".
+# Se calibran con `mic_level.py --doa` con el robot prendido y sin nadie.
+DOA_BLOCKED_SECTORS = _env_str("DOA_BLOCKED_SECTORS", "")
+# Para un SEGUNDO «oye rai» estando despierto (otra persona toma el foco): no
+# alcanza con que el spotter lo oiga, tiene que pasar el filtro de cercanía
+# general (o venir del foco actual). Si no, un «rai» de fondo se robaría el
+# robot. Ventana de audio hacia atrás que se mira para la dirección del wake.
+WAKE_DOA_WINDOW_S = _env_float("WAKE_DOA_WINDOW_S", 1.2)
+
 # --- Wake word ----------------------------------------------------------------
 # Con esto activado el robot ignora TODO lo que se transcribe hasta que alguien
 # lo llama por su nombre. Después queda "despierto" una ventana de tiempo para
@@ -141,8 +218,9 @@ NOISE_WINDOW_MS = int(_env_float("NOISE_WINDOW_MS", 2000))
 WAKE_WORD_ENABLED = _env_bool("WAKE_WORD_ENABLED", True)
 # Cómo se detecta el nombre:
 #   "audio": spotter local (Vosk) escuchando "oye rai" todo el tiempo. Dormido
-#            no se manda NADA a Groq; al reconocer la frase suena un beep y
-#            recién ahí se transcribe. Es el modo "como Siri" (wake_spotter.py).
+#            no se manda NADA a Groq; al reconocer la frase el robot dice
+#            «Sí, dime» (por el parlante de la Jetson) y recién ahí se
+#            transcribe. Es el modo "como Siri" (wake_spotter.py).
 #   "text":  se transcribe cada frase que pasa el VAD y se busca "rai" en el
 #            texto (wake_word.py). Más lento (~2 s) y gasta Groq dormido, pero
 #            no necesita el modelo Vosk. Si "audio" no puede arrancar (vosk no
@@ -166,20 +244,13 @@ WAKE_COOLDOWN_S = _env_float("WAKE_COOLDOWN_S", 1.5)
 WAKE_QUEUE_S = _env_float("WAKE_QUEUE_S", 3.0)
 # Modelo Vosk (carpeta descomprimida). Ver README para descargarlo.
 WAKE_MODEL_NAME = _env_str("WAKE_MODEL_NAME", "vosk-model-small-es-0.42")
-# Sonido al despertar: "beep" (generado), "none", o ruta a un .wav 16-bit.
-WAKE_SOUND = _env_str("WAKE_SOUND", "beep")
-# Avisar al orquestador cada cambio despierto/dormido (mismo socket que el
-# texto, con el prefijo ORCH_EVENT_PREFIX): él hace sonar un chime por SU
-# parlante — agudo al despertar, grave al vencerse la ventana. Útil cuando la
-# Pi no tiene parlante (WAKE_SOUND=none) y el que se oye es el del robot.
-WAKE_EVENTS_ENABLED = _env_bool("WAKE_EVENTS_ENABLED", True)
+# La Pi NO emite sonido: todo lo audible sale del parlante de la Jetson. Cada
+# «oye rai» se le avisa al orquestador como evento (mismo socket que el texto,
+# prefijo ORCH_EVENT_PREFIX) y él contesta «Sí, dime»; al vencerse la ventana,
+# un chime grave. Eventos: awake, asleep, stop, doa:<grados>.
 # Debe coincidir con EVENT_PREFIX en orchestrator.py. Whisper nunca devuelve
 # texto que empiece así, por eso se puede compartir el socket del texto.
 ORCH_EVENT_PREFIX = "@@event:"
-WAKE_SOUND_VOLUME = _env_float("WAKE_SOUND_VOLUME", 0.4)
-# Parlante para el beep (índice de sounddevice; vacío = default del sistema).
-_out = _env_str("AUDIO_OUTPUT_DEVICE", "")
-WAKE_SOUND_DEVICE = int(_out) if _out else None
 # Variantes con las que Whisper suele escribir "rai". Se comparan en minúsculas,
 # sin acentos ni puntuación (y también sobre las iniciales pegadas: "R.A.I." ->
 # "r a i" -> "rai").
@@ -194,20 +265,37 @@ WAKE_SEARCH_WORDS = int(_env_float("WAKE_SEARCH_WORDS", 3))
 # puede seguir hablando sin volver a decir "rai". Cada frase aceptada —y cada
 # respuesta hablada del robot— la renueva.
 WAKE_WINDOW_S = _env_float("WAKE_WINDOW_S", 25.0)
-# Si la frase es SÓLO el nombre ("rai"), qué mandarle al orquestador para que
-# conteste algo y se note que está escuchando. "" = no mandar nada (sólo abre
-# la ventana en silencio). En modo "audio" el beep ya hace de confirmación y
-# el "oye rai" solo ni siquiera se transcribe, así que por defecto va vacío.
-WAKE_ACK_TEXT = _env_str("WAKE_ACK_TEXT", "rai" if WAKE_MODE == "text" else "")
-# Atención: al despertarse, el robot se queda con el NIVEL de la voz que lo
-# llamó y, mientras dure la ventana, sólo acepta frases que lleguen al menos a
-# ese nivel × ATTENTION_LEVEL_RATIO. Quien está más lejos que quien dijo "rai"
-# (el fondo de la sala) queda afuera aunque pase el filtro de cercanía general.
-# 1.0 = tan fuerte como el "rai"; 0.5 = la mitad. 0 = desactivado.
-ATTENTION_LEVEL_RATIO = _env_float("ATTENTION_LEVEL_RATIO", 0.6)
-# El nivel de referencia sigue a la persona (EMA por frase aceptada): si se
-# acerca o aleja un poco, la referencia se mueve con ella.
+# Si la frase es SÓLO el nombre ("rai"), qué mandarle al orquestador como
+# turno. Por defecto nada: el orquestador ya contesta «Sí, dime» al evento
+# `awake`.
+WAKE_ACK_TEXT = _env_str("WAKE_ACK_TEXT", "")
+# Atención por NIVEL, sólo sin mic array (con el ReSpeaker manda la dirección,
+# DoA). La gente dice «hola rai» fuerte y la instrucción más bajo, así que la
+# referencia NO es el volumen del wake: es la primera instrucción aceptada
+# después (y la sigue con una EMA). Mientras dure la ventana se exige llegar a
+# referencia × este factor. 0 = desactivado.
+ATTENTION_LEVEL_RATIO = _env_float("ATTENTION_LEVEL_RATIO", 0.25)
+# Lo mismo con el ReSpeaker: por defecto apagado, la dirección hace ese trabajo.
+ATTENTION_LEVEL_RATIO_ARRAY = _env_float("ATTENTION_LEVEL_RATIO_ARRAY", 0.0)
 ATTENTION_FOLLOW_ALPHA = 0.3
+
+# --- Mientras el robot habla ----------------------------------------------------
+# "mute": se descarta todo el audio (como siempre).
+# "keyword": se sigue descartando todo, salvo una ORDEN DE CORTE
+#   (SPEAK_STOP_PHRASES o la frase de wake) que reconoce el spotter, viene de
+#   fuera del sector del parlante (DOA_SPEAKER_SECTOR) y suena
+#   SPEAK_BARGE_RATIO veces más fuerte que el parlante en ese momento. Manda
+#   `stop` al orquestador (y si fue «oye rai», además re-despierta). Requiere
+#   WAKE_MODE=audio. Dejar en "mute" hasta probar que no corta solo.
+SPEAK_LISTEN_MODE = _env_str("SPEAK_LISTEN_MODE", "mute").lower()
+# Dos palabras como WAKE_PHRASES (una sola, "para", aparece en cualquier frase
+# del propio robot); "rai" suele salir "ray"/"rey" en Vosk, por eso las variantes.
+SPEAK_STOP_PHRASES = _env_list("SPEAK_STOP_PHRASES",
+                               ("para rai", "para ray", "basta rai", "basta ray"))
+SPEAK_BARGE_RATIO = _env_float("SPEAK_BARGE_RATIO", 2.0)
+# Dónde está el parlante del robot visto desde el array (marco del robot,
+# mismo formato que DOA_BLOCKED_SECTORS). Vacío = no se chequea dirección.
+DOA_SPEAKER_SECTOR = _env_str("DOA_SPEAKER_SECTOR", "")
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(_HERE, "..", "models", f"faster-whisper-{MODEL_SIZE}")

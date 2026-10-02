@@ -28,7 +28,7 @@ stt-project/
 
 - **Development machine:** Windows 10/11 PC
 - **Target deployment:** Raspberry Pi 5 (4 GB or 8 GB) with Raspberry Pi OS 64-bit (Bookworm)
-- **Microphone:** USB conference microphone (USB Audio Class compliant)
+- **Microphone:** ReSpeaker USB Mic Array v2.0 (Linux/Pi: foco por dirección, ver `linux/README.md`), o cualquier mic USB Audio Class
 
 ## Software Stack
 

@@ -19,6 +19,10 @@ decoder ve la frase completa dispara, sin esperar a que cierre la utterance.
 Después resetea el reconocedor y espera WAKE_COOLDOWN_S para no disparar dos
 veces por la misma frase (parcial + final).
 
+Con SPEAK_LISTEN_MODE=keyword la gramática suma las órdenes de corte
+(SPEAK_STOP_PHRASES, «para rai»): `is_stop(text)` dice si una detección fue
+una de ésas. main.py sólo las atiende mientras el robot habla.
+
 Uso desde main.py: `spotter.feed(frame)` por cada frame de 30 ms (mismo
 formato que el VAD: int16 mono 16 kHz) y `spotter.take_detection()` en el loop
 de captura para enterarse. El decodificado corre en su propio hilo con una
@@ -62,7 +66,7 @@ class SpotterStats:
 
 
 class WakeSpotter:
-    def __init__(self) -> None:
+    def __init__(self, stop_phrases: tuple[str, ...] = ()) -> None:
         # Import acá y no arriba: main.py tiene que poder arrancar en modo
         # texto aunque vosk no esté instalado.
         from vosk import KaldiRecognizer, Model, SetLogLevel
@@ -74,9 +78,13 @@ class WakeSpotter:
         # Kaldi es muy charlatán por stderr; sólo con LOG_DEBUG=1.
         SetLogLevel(0 if DEBUG else -1)
 
-        self._phrases = tuple(dict.fromkeys(normalize(p) for p in WAKE_PHRASES if normalize(p)))
-        if not self._phrases:
+        self._wake_phrases = tuple(dict.fromkeys(normalize(p) for p in WAKE_PHRASES if normalize(p)))
+        if not self._wake_phrases:
             raise ValueError("WAKE_PHRASES vacío")
+        self._stop_phrases = tuple(dict.fromkeys(
+            normalize(p) for p in stop_phrases
+            if normalize(p) and normalize(p) not in self._wake_phrases))
+        self._phrases = self._wake_phrases + self._stop_phrases
         grammar = json.dumps(list(self._phrases) + ["[unk]"])
 
         t0 = time.monotonic()
@@ -116,6 +124,10 @@ class WakeSpotter:
             return None
         self._detected.clear()
         return self._detected_text
+
+    def is_stop(self, text: str) -> bool:
+        """¿La detección `text` fue una orden de corte (no la frase de wake)?"""
+        return self._matches(text) in self._stop_phrases
 
     def pop_stats(self) -> SpotterStats:
         with self._lock:
@@ -181,19 +193,17 @@ class WakeSpotter:
 def _live() -> None:
     """Prueba en vivo: mic -> spotter, sin VAD ni Groq."""
     from audio_capture import LinuxAudioCapture
-    from wake_sound import WakeSound
+    from config import SPEAK_STOP_PHRASES
 
     device_env = os.getenv("AUDIO_INPUT_DEVICE", "").strip()
-    spotter = WakeSpotter()
-    sound = WakeSound()
-    info("SPOT", "Hablale al mic. Decí una de las frases de wake; Ctrl+C para salir.")
+    spotter = WakeSpotter(stop_phrases=SPEAK_STOP_PHRASES)
+    info("SPOT", "Hablale al mic. Decí una frase de wake o de corte; Ctrl+C para salir.")
     last_hb = time.monotonic()
     for frame in LinuxAudioCapture(device_id=int(device_env) if device_env else None).frames():
-        spotter.feed(frame)
+        spotter.feed(frame.pcm)
         text = spotter.take_detection()
         if text:
-            sound.play()
-            ok("WAKE", f"DESPIERTO por «{text}»")
+            ok("WAKE", f"{'CORTE' if spotter.is_stop(text) else 'DESPIERTO'} por «{text}»")
         if time.monotonic() - last_hb >= 5:
             last_hb = time.monotonic()
             st = spotter.pop_stats()

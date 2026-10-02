@@ -18,24 +18,39 @@ for _stream in (sys.stdout, sys.stderr):
     except (AttributeError, ValueError):
         pass
 
-from audio_capture import LinuxAudioCapture
+from collections import deque
+
+from audio_capture import AudioFrame, LinuxAudioCapture
 from battery import POWER_LOG_S, report_power
 from config import (
+    ATTENTION_LEVEL_RATIO,
+    ATTENTION_LEVEL_RATIO_ARRAY,
     BACKEND,
     CTRL_PORT,
+    DOA_MIN_IN_FOCUS,
+    DOA_POLL_HZ,
+    DOA_SPEAKER_SECTOR,
+    DOA_TOLERANCE_DEG,
     FRAME_MS,
     ORCH_EVENT_PREFIX,
+    RESPEAKER_ENABLED,
+    RESPEAKER_LED_BRIGHTNESS,
+    RESPEAKER_PARAMS,
+    SPEAK_BARGE_RATIO,
+    SPEAK_LISTEN_MODE,
+    SPEAK_STOP_PHRASES,
     STT_PROMPT,
-    WAKE_EVENTS_ENABLED,
+    WAKE_DOA_WINDOW_S,
     WAKE_MODE,
     WAKE_PHRASES,
     WAKE_WINDOW_S,
     WAKE_WORD_ENABLED,
 )
 from ctrl_server import SpeakMute, start_in_background
+from doa import DoaFocus, DoaReading, in_any_sector, parse_sectors, to_robot_frame
 from log import DEBUG, dbg, dim, drop, err, fmt, info, ok, warn
+from respeaker import ReSpeaker
 from vad import VoiceActivityDetector
-from wake_sound import WakeSound
 from wake_word import WakeWord, normalize
 
 if BACKEND == "groq":
@@ -133,7 +148,8 @@ class Counters:
         self.unfocused = 0      # utterances más flojas que quien nos llamó
         self.wakes = 0          # disparos del spotter de audio
         self.asleep = 0         # utterances descartadas por estar dormido (modo audio)
-        self.beep_frames = 0    # frames descartados mientras sonaba el beep
+        self.off_focus = 0      # utterances descartadas por dirección (DoA)
+        self.barge_ins = 0      # órdenes de corte enviadas mientras el robot hablaba
         self.dropped_stale = 0  # utterances descartadas por vieja/atrasada en cola
 
 
@@ -203,38 +219,140 @@ def transcribe_worker(
                 counters.send_failed += 1
 
 
-# Cada cuánto el watcher mira si el wake word cambió de estado. Marca el
-# retraso máximo del chime de "despierto" respecto del "oye rai" (más el TCP).
+# Cada cuánto el emisor de eventos mira si hubo un wake o si se durmió. Marca
+# el retraso máximo del «Sí, dime» respecto del «oye rai» (más el TCP).
 WAKE_EVENT_POLL_S = 0.1
 
 
-def wake_event_worker(
-    wake: WakeWord,
-    orchestrator_ip: str,
-    orchestrator_port: int,
-) -> None:
-    """Avisa al orquestador cada transición dormido<->despierto.
+class OrchestratorEvents:
+    """Eventos para el orquestador (`@@event:<nombre>`, mismo socket que el
+    texto). La Pi no tiene parlante: así se entera el orquestador de que tiene
+    que decir «Sí, dime» (awake), sonar el chime de dormirse (asleep), cortar
+    lo que está diciendo (stop) o registrar la dirección (doa:<grados>).
 
-    Se hace por polling y no con un callback en WakeWord porque dormirse no es
-    un evento: la ventana simplemente vence (`is_awake()` pasa a False solo).
-    Cubre las dos formas de despertar (spotter de audio y "rai" en el texto) y
-    las dos de dormirse (vencimiento y `sleep()`). El envío bloquea hasta 3 s
-    si el orquestador no responde, por eso corre en su propio hilo.
+    `awake` sale por CADA wake (`WakeWord.wake_seq`), también estando ya
+    despierto: otra persona dijo «oye rai» y toma el foco. `asleep` sale al
+    vencerse la ventana: no es un evento, es tiempo que pasa, por eso se mira
+    por polling. Los envíos bloquean hasta 3 s si el orquestador no responde:
+    corren en su propio hilo, en orden.
     """
-    was_awake = wake.is_awake()
-    while True:
-        time.sleep(WAKE_EVENT_POLL_S)
-        awake = wake.is_awake()
-        if awake == was_awake:
-            continue
-        was_awake = awake
-        name = "awake" if awake else "asleep"
-        if awake:
-            dim("WAKE", "aviso al orquestador: despierto")
-        else:
-            info("WAKE", f"DORMIDO (pasaron {WAKE_WINDOW_S:.0f}s sin hablarme), aviso al orquestador")
-        send_to_orchestrator(ORCH_EVENT_PREFIX + name, orchestrator_ip, orchestrator_port,
-                             quiet=True)
+
+    def __init__(self, wake: WakeWord, ip: str, port: int, on_asleep=None) -> None:
+        self._wake = wake
+        self._ip = ip
+        self._port = port
+        self._on_asleep = on_asleep
+        self._queue: "queue.Queue[str]" = queue.Queue()
+
+    def send(self, name: str) -> None:
+        self._queue.put(name)
+
+    def start(self) -> None:
+        threading.Thread(target=self._run, name="orch-events", daemon=True).start()
+
+    def _run(self) -> None:
+        seen_seq = self._wake.wake_seq()
+        was_awake = self._wake.is_awake()
+        while True:
+            try:
+                name = self._queue.get(timeout=WAKE_EVENT_POLL_S)
+            except queue.Empty:
+                name = None
+            seq = self._wake.wake_seq()
+            if seq != seen_seq:
+                seen_seq = seq
+                dim("WAKE", "aviso al orquestador: despierto («Sí, dime»)")
+                self._post("awake")
+            awake = self._wake.is_awake()
+            if was_awake and not awake:
+                info("WAKE", f"DORMIDO (pasaron {WAKE_WINDOW_S:.0f}s sin hablarme), aviso al orquestador")
+                if self._on_asleep is not None:
+                    self._on_asleep()
+                self._post("asleep")
+            was_awake = awake
+            if name is not None:
+                self._post(name)
+
+    def _post(self, name: str) -> None:
+        send_to_orchestrator(ORCH_EVENT_PREFIX + name, self._ip, self._port, quiet=True)
+
+
+class Spatial:
+    """Dirección de la voz con el ReSpeaker (None-safe: sin array, todo pasa).
+
+    Junta respeaker.py (lecturas de DoA) y doa.py (foco) para lo que main
+    necesita: dirección del «oye rai», juicio de cada frase y LEDs.
+    """
+
+    def __init__(self, array: ReSpeaker | None) -> None:
+        self.array = array
+        self.focus = DoaFocus()
+        self.speaker_sector = parse_sectors(DOA_SPEAKER_SECTOR)
+
+    @property
+    def enabled(self) -> bool:
+        return self.array is not None and self.array.polling
+
+    def angles(self, t0: float, t1: float) -> list[float]:
+        """Ángulos (marco del robot) de las lecturas CON VOZ en [t0, t1]."""
+        if not self.enabled:
+            return []
+        return [to_robot_frame(s.angle) for s in self.array.samples_between(t0, t1) if s.voice]
+
+    def reading(self, t0: float, t1: float) -> DoaReading:
+        return self.focus.summarize(self.angles(t0, t1))
+
+    def from_speaker(self, t0: float, t1: float) -> bool:
+        """¿La voz de [t0, t1] viene mayormente del parlante del robot?"""
+        angles = self.angles(t0, t1)
+        if not self.speaker_sector or len(angles) < 2:
+            return False
+        return sum(in_any_sector(a, self.speaker_sector) for a in angles) / len(angles) >= 0.5
+
+    def leds_awake(self) -> None:
+        if self.array is not None:
+            self.array.leds_listen()
+
+    def leds_asleep(self) -> None:
+        if self.array is not None:
+            self.array.leds_off()
+
+    def on_asleep(self) -> None:
+        self.focus.clear()
+        self.leds_asleep()
+
+
+def _deg(angle: float | None) -> str:
+    return "?" if angle is None else f"{angle:.0f}°"
+
+
+class BargeIn:
+    """SPEAK_LISTEN_MODE=keyword: mientras el robot habla, el spotter sigue
+    escuchando sólo las órdenes de corte. Para no cortarse solo con su propia
+    voz, una detección vale si (1) no viene del sector del parlante y (2) en el
+    último ~0.8 s hubo un pico SPEAK_BARGE_RATIO veces más fuerte que el nivel
+    típico del parlante durante este mute (mediana de los frames anteriores)."""
+
+    _RECENT_S = 0.8
+
+    def __init__(self) -> None:
+        self._levels: deque[float] = deque(maxlen=int(10_000 / FRAME_MS))  # ~10 s
+
+    def reset(self) -> None:
+        self._levels.clear()
+
+    def feed(self, rms: float) -> None:
+        self._levels.append(rms)
+
+    def loud_enough(self) -> tuple[bool, float, float]:
+        recent_n = max(1, int(self._RECENT_S * 1000 / FRAME_MS))
+        levels = list(self._levels)
+        if len(levels) <= recent_n + 5:
+            return False, 0.0, 0.0
+        recent, before = levels[-recent_n:], sorted(levels[:-recent_n])
+        speaker = before[len(before) // 2]
+        peak = max(recent)
+        return peak >= speaker * SPEAK_BARGE_RATIO, peak, speaker
 
 
 def heartbeat_worker(
@@ -242,6 +360,7 @@ def heartbeat_worker(
     mute: SpeakMute,
     wake: WakeWord,
     spotter,
+    spatial: Spatial,
     audio_queue: "queue.Queue",
     counters: Counters,
 ) -> None:
@@ -255,14 +374,12 @@ def heartbeat_worker(
     bien y en amarillo si detecta un problema.
     """
     last_muted = 0
-    last_beep = 0
     last_power = time.monotonic()
     while True:
         time.sleep(HEARTBEAT_S)
         st = vad.pop_stats()
         muted_delta, last_muted = counters.muted_frames - last_muted, counters.muted_frames
-        beep_delta, last_beep = counters.beep_frames - last_beep, counters.beep_frames
-        got_frames = st.frames + muted_delta + beep_delta
+        got_frames = st.frames + muted_delta
         expected = int(HEARTBEAT_S * 1000 / FRAME_MS)
 
         problem = False
@@ -303,15 +420,33 @@ def heartbeat_worker(
             totals += f" cola={audio_queue.qsize()}"
         if counters.dropped_stale:
             totals += f" descartadas_viejas={counters.dropped_stale}"
+        if counters.off_focus:
+            totals += f" fuera_de_foco={counters.off_focus}"
+        if counters.barge_ins:
+            totals += f" cortes={counters.barge_ins}"
         parts.append(totals)
 
         # 5. Estado.
         if mute.is_muted():
             parts.append("MUTE")
         if wake.is_awake():
-            parts.append("despierto " + fmt(foco=wake.focus_level(), minimo=wake.min_level()))
+            awake = "despierto"
+            if spatial.enabled:
+                awake += f" foco={_deg(spatial.focus.focus)}±{DOA_TOLERANCE_DEG:.0f}"
+            if wake.min_level() > 0:
+                awake += " " + fmt(nivel_ref=wake.focus_level(), minimo=wake.min_level())
+            parts.append(awake)
         else:
             parts.append("dormido")
+        if spatial.array is not None:
+            if not spatial.enabled:
+                parts.append("DoA CAÍDO")
+                problem = True
+            else:
+                last = spatial.array.latest()
+                if last is not None:
+                    parts.append(f"doa {_deg(to_robot_frame(last.angle))}"
+                                 f"{' voz' if last.voice else ''} ({spatial.array.poll_hz:.0f}/s)")
         if spotter is not None:
             sp = spotter.pop_stats()
             if sp.last_text:
@@ -352,7 +487,26 @@ def main() -> None:
     transcriber = Transcriber()
     vad = VoiceActivityDetector()
     capture = LinuxAudioCapture(device_id=audio_device)
-    wake = WakeWord()
+
+    # Mic array: parámetros DSP + lecturas de dirección (DoA) por USB.
+    array = ReSpeaker.open() if RESPEAKER_ENABLED else None
+    if array is not None and not capture.is_array:
+        warn("ARRAY", "el ReSpeaker está conectado pero el audio sale de otro mic "
+             "(AUDIO_INPUT_DEVICE): su DoA no sirve para ese audio, lo ignoro")
+        array = None
+    if array is not None:
+        array.apply_params(RESPEAKER_PARAMS)
+        array.leds_brightness(RESPEAKER_LED_BRIGHTNESS)
+        array.leds_off()
+        array.start_polling(DOA_POLL_HZ)
+        ok("ARRAY", f"ReSpeaker: foco por dirección activo (DoA a {DOA_POLL_HZ:.0f} Hz)")
+    elif capture.is_array:
+        warn("ARRAY", "audio del ReSpeaker pero sin control USB (pyusb/permisos, ver "
+             "README): sin DoA ni parámetros DSP, foco sólo por nivel")
+    spatial = Spatial(array)
+
+    wake = WakeWord(level_ratio=(ATTENTION_LEVEL_RATIO_ARRAY if spatial.enabled
+                                 else ATTENTION_LEVEL_RATIO))
     counters = Counters()
 
     # Mute remoto: el orquestador avisa SPEAK_START/SPEAK_END mientras habla
@@ -363,14 +517,17 @@ def main() -> None:
     start_in_background(CTRL_PORT, mute)
     dim("CTRL", f"espero SPEAK_START/SPEAK_END del orquestador en :{CTRL_PORT}")
 
-    # Wake por audio: spotter local (Vosk) + beep. Si no puede arrancar, el
-    # robot sigue funcionando con el wake por texto de siempre.
+    # Wake por audio: spotter local (Vosk). Si no puede arrancar, el robot
+    # sigue funcionando con el wake por texto de siempre.
+    barge_mode = SPEAK_LISTEN_MODE == "keyword"
+    if SPEAK_LISTEN_MODE not in ("mute", "keyword"):
+        warn("CTRL", f"SPEAK_LISTEN_MODE={SPEAK_LISTEN_MODE!r} desconocido, uso 'mute'")
+        barge_mode = False
     spotter = None
-    sound = WakeSound()
     if WAKE_WORD_ENABLED and WAKE_MODE == "audio":
         try:
             from wake_spotter import WakeSpotter
-            spotter = WakeSpotter()
+            spotter = WakeSpotter(stop_phrases=SPEAK_STOP_PHRASES if barge_mode else ())
         except Exception as exc:  # noqa: BLE001 - ImportError, modelo ausente...
             warn("SPOT", f"no pude arrancar el wake por audio ({type(exc).__name__}: {exc}); "
                  f"caigo a WAKE_MODE=text")
@@ -380,11 +537,17 @@ def main() -> None:
     if not WAKE_WORD_ENABLED:
         warn("WAKE", "wake word DESACTIVADO (WAKE_WORD_ENABLED=False): se envía todo")
     elif spotter is not None:
-        info("WAKE", f"modo AUDIO: decí «{WAKE_PHRASES[0]}» y esperá el beep; "
+        info("WAKE", f"modo AUDIO: decí «{WAKE_PHRASES[0]}» y esperá el «Sí, dime» del robot; "
              f"dormido no transcribo nada; ventana {WAKE_WINDOW_S:.0f}s")
     else:
         info("WAKE", f"modo TEXTO: decí «rai» al principio de la frase; "
              f"ventana {WAKE_WINDOW_S:.0f}s")
+    if barge_mode and spotter is None:
+        warn("CTRL", "SPEAK_LISTEN_MODE=keyword necesita el spotter de audio: uso 'mute'")
+        barge_mode = False
+    elif barge_mode:
+        info("CTRL", "mientras el robot habla escucho órdenes de corte: "
+             + ", ".join(f"«{p}»" for p in SPEAK_STOP_PHRASES))
     dim("MAIN", f"heartbeat cada {HEARTBEAT_S:.0f}s (LOG_HEARTBEAT_S), "
         f"debug {'ON' if DEBUG else 'off'} (LOG_DEBUG=1)")
 
@@ -399,28 +562,63 @@ def main() -> None:
     )
     worker.start()
 
-    # Chime remoto: el orquestador suena al despertar / dormirse (ver
-    # wake_event_worker). Independiente del beep local (WAKE_SOUND).
-    if WAKE_WORD_ENABLED and WAKE_EVENTS_ENABLED:
-        threading.Thread(
-            target=wake_event_worker,
-            args=(wake, ORCHESTRATOR_IP, ORCHESTRATOR_PORT),
-            daemon=True,
-        ).start()
+    # Eventos al orquestador: él habla por el parlante de la Jetson («Sí,
+    # dime» en cada wake, chime al dormirse). La Pi no emite sonido.
+    events = OrchestratorEvents(wake, ORCHESTRATOR_IP, ORCHESTRATOR_PORT,
+                                on_asleep=spatial.on_asleep)
+    if WAKE_WORD_ENABLED:
+        events.start()
 
     if HEARTBEAT_S > 0:
         threading.Thread(
             target=heartbeat_worker,
-            args=(vad, mute, wake, spotter, audio_queue, counters),
+            args=(vad, mute, wake, spotter, spatial, audio_queue, counters),
             daemon=True,
         ).start()
+
+    def handle_wake(heard: str, now: float) -> bool:
+        """El spotter oyó la frase de wake. Despierta (o pasa el foco a quien
+        la dijo) y fija la dirección. False si no corresponde atenderla."""
+        reading = spatial.reading(now - WAKE_DOA_WINDOW_S, now)
+        if spatial.enabled and reading.n >= 2 and reading.blocked >= 0.6:
+            drop("WAKE", f"«{heard}» desde un sector de ruido del robot",
+                 dir=_deg(reading.direction))
+            return False
+        if wake.is_awake():
+            # Traspaso: otra persona (o la misma) vuelve a llamarlo. Tiene que
+            # sonar cerca (filtro general) o venir del foco actual: un «rai»
+            # de fondo no se roba el robot.
+            level, near = vad.current_level(), vad.near_threshold()
+            same_place = (spatial.focus.focus is not None
+                          and reading.in_focus >= DOA_MIN_IN_FOCUS)
+            if level < near and not same_place:
+                drop("WAKE", f"otro «{heard}» pero lejano: no cambio el foco",
+                     nivel=level, umbral=near, dir=_deg(reading.direction))
+                return False
+        old_focus = spatial.focus.focus
+        wake.wake_from_audio()
+        if spatial.enabled:
+            new_focus = reading.direction if reading.n >= 2 else None
+            spatial.focus.lock(new_focus)
+            if old_focus is not None and new_focus is not None:
+                ok("DOA", f"NUEVO FOCO dir {_deg(old_focus)}→{_deg(new_focus)} "
+                   f"({reading.n} lecturas)")
+            else:
+                ok("DOA", f"foco en {_deg(new_focus)} ({reading.n} lecturas con voz)")
+            if new_focus is not None:
+                events.send(f"doa:{new_focus:.0f}")
+            spatial.leds_awake()
+        return True
+
+    barge = BargeIn()
 
     info("NET", f"orquestador en {ORCHESTRATOR_IP}:{ORCHESTRATOR_PORT}")
 
     try:
         first_frame = True
         was_muted = False
-        for frame in capture.frames():
+        for af in capture.frames():
+            frame = af.pcm
             if first_frame:
                 first_frame = False
                 ok("AUDIO", "primer frame del mic: escuchando")
@@ -428,6 +626,7 @@ def main() -> None:
             if mute.is_muted():
                 if not was_muted:
                     was_muted = True
+                    barge.reset()
                     # Lo que quedó a medio decir cuando el robot arrancó a
                     # hablar es viejo: no dejar que se cierre (y se envíe)
                     # recién al desmutear.
@@ -448,27 +647,42 @@ def main() -> None:
                         info("MAIN", f"{drained} utterance(s) en cola descartada(s) "
                              "por mute (robot empezó a hablar)")
                 counters.muted_frames += 1
+                if barge_mode:
+                    # Orden de corte: el spotter sigue oyendo mientras habla.
+                    barge.feed(af.rms if af.rms is not None else vad.frame_rms(frame))
+                    spotter.feed(frame)
+                    heard = spotter.take_detection()
+                    if heard:
+                        loud, peak, speaker = barge.loud_enough()
+                        if spatial.from_speaker(af.t - WAKE_DOA_WINDOW_S, af.t):
+                            drop("CTRL", f"«{heard}» vino del parlante del robot")
+                        elif not loud:
+                            drop("CTRL", f"«{heard}» no se destaca sobre la voz del robot",
+                                 pico=peak, parlante=speaker, factor=SPEAK_BARGE_RATIO)
+                        else:
+                            counters.barge_ins += 1
+                            ok("CTRL", f"ORDEN DE CORTE «{heard}» " + fmt(pico=peak, parlante=speaker))
+                            events.send("stop")
+                            # «oye rai» en vez de «para rai»: además re-despierta
+                            # (el orquestador contesta «Sí, dime»).
+                            if not spotter.is_stop(heard) and handle_wake(heard, af.t):
+                                counters.wakes += 1
                 continue
             was_muted = False
-            # Suena el beep de wake: no escucharse a sí mismo.
-            if sound.is_playing():
-                counters.beep_frames += 1
-                continue
             if spotter is not None:
                 spotter.feed(frame)
                 heard = spotter.take_detection()
-                if heard:
-                    counters.wakes += 1
-                    # El nivel de la utterance en curso es el de quien dijo
-                    # "oye rai": a eso le prestamos atención.
-                    wake.wake_from_audio(vad.current_level())
-                    # El "oye rai" ya cumplió: no gastar Groq en transcribirlo.
-                    # Si la persona sigue hablando, el VAD abre otra utterance
-                    # enseguida (pre-buffer de 200 ms) y esa sí va a Groq.
-                    vad.discard_open_utterance(reason="era el «oye rai», no hace falta transcribirlo")
-                    sound.play()
-                    continue
-            closed, audio = vad.process_frame(frame)
+                # Las órdenes de corte sólo valen mientras el robot habla.
+                if heard and not spotter.is_stop(heard):
+                    if handle_wake(heard, af.t):
+                        counters.wakes += 1
+                        # El "oye rai" ya cumplió: no gastar Groq en
+                        # transcribirlo. Si la persona sigue hablando, el VAD
+                        # abre otra utterance enseguida (pre-buffer de 200 ms)
+                        # y esa sí va a Groq.
+                        vad.discard_open_utterance(reason="era el «oye rai», no hace falta transcribirlo")
+                        continue
+            closed, audio = vad.process_frame(frame, af.rms, af.t)
             # Mientras le están hablando no se duerme: si la ventana vence a
             # mitad de frase, al cerrarla se descartaría por "dormido".
             if vad.in_speech:
@@ -482,8 +696,23 @@ def main() -> None:
                     drop("WAKE", f"dormido: no transcribo hasta oír «{WAKE_PHRASES[0]}»",
                          nivel=level)
                     continue
-                # Atención: despierto, sólo transcribimos lo que suena tan
-                # fuerte como quien dijo "rai" (el fondo no gasta Whisper).
+                # Dirección: ¿viene de quien lo llamó? (y nunca de un sector
+                # de ruido propio del robot). Sin array, no decide nada.
+                if spatial.enabled and vad.last_span is not None:
+                    reading = spatial.reading(*vad.last_span)
+                    accepted, why = spatial.focus.judge(reading)
+                    if not accepted:
+                        counters.off_focus += 1
+                        drop("DOA", why, dir=_deg(reading.direction),
+                             foco=f"{_deg(spatial.focus.focus)}±{DOA_TOLERANCE_DEG:.0f}",
+                             en_foco=f"{reading.in_focus:.0%}", lecturas=reading.n)
+                        continue
+                    if wake.is_awake() and reading.n >= 2:
+                        spatial.focus.follow(reading.direction)
+                    dbg(f"dirección {_deg(reading.direction)} ({why}, "
+                        f"{reading.in_focus:.0%} en foco, {reading.n} lecturas)", "DOA")
+                # Atención por nivel (sin array): despierto, sólo lo que llega
+                # al nivel de esta conversación (el fondo no gasta Whisper).
                 if not wake.accepts_level(level):
                     counters.unfocused += 1
                     continue

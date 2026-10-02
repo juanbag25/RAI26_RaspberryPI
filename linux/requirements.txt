@@ -5,3 +5,4 @@ webrtcvad-wheels
 groq
 python-dotenv
 vosk
+pyusb

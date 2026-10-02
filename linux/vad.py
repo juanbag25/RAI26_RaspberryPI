@@ -17,11 +17,17 @@ El piso de ruido se mide en vivo con los frames descartados (incluye el murmullo
 lejano), así que en una sala ruidosa el filtro se endurece solo; está topeado en
 NOISE_FLOOR_MAX para que un ruido fuerte y sostenido no deje sordo al robot.
 
+Con el ReSpeaker el nivel (RMS) no se mide sobre el audio que se transcribe
+(ch0, con AGC) sino sobre los mics crudos: lo pasa audio_capture.py en
+`AudioFrame.rms`. Cada utterance guarda además su intervalo de tiempo
+(`last_span`) para cruzarlo con las lecturas de dirección (doa.py).
+
 Los umbrales se calibran con `python mic_level.py`.
 """
 
 from __future__ import annotations
 
+import time
 from collections import deque
 from dataclasses import dataclass, field
 
@@ -83,6 +89,10 @@ class VoiceActivityDetector:
         # Nivel (p90) de la última utterance aceptada: main.py lo lee justo
         # después de process_frame() para la atención del wake word.
         self.last_level = 0.0
+        # (inicio, fin) en time.monotonic() de la última utterance cerrada y
+        # aceptada: main.py lo cruza con las muestras de DoA.
+        self.last_span: tuple[float, float] | None = None
+        self._utt_start_t = 0.0
         self._stats = VadStats()
         self._reset_utterance()
         dim("VAD", f"filtro: abre>={RMS_THRESHOLD} cerca>={NEAR_RMS_THRESHOLD} "
@@ -144,9 +154,16 @@ class VoiceActivityDetector:
         absolute = self.open_threshold() * CLOSE_RMS_RATIO
         return max(absolute, self._utterance_level() * CONTINUE_LEVEL_RATIO)
 
-    def process_frame(self, frame_bytes: bytes) -> tuple[bool, np.ndarray | None]:
+    def process_frame(self, frame_bytes: bytes, rms: float | None = None,
+                      t: float | None = None) -> tuple[bool, np.ndarray | None]:
+        """`rms`: nivel a usar para los umbrales (con el ReSpeaker, el de los
+        mics crudos); None = calcularlo de `frame_bytes`. `t`: time.monotonic()
+        del frame (para `last_span`); None = ahora."""
         is_speech = self._vad.is_speech(frame_bytes, SAMPLE_RATE)
-        rms = self._frame_rms(frame_bytes)
+        if rms is None:
+            rms = self._frame_rms(frame_bytes)
+        if t is None:
+            t = time.monotonic()
 
         st = self._stats
         st.frames += 1
@@ -169,6 +186,7 @@ class VoiceActivityDetector:
                     # que exigir varios no come el arranque de la palabra.
                     self._in_speech = True
                     self._utterance = list(self._pre_buffer)
+                    self._utt_start_t = t - len(self._utterance) * FRAME_MS / 1000.0
                     self._silence_count = 0
                     self._speech_frame_count = self._onset_count
                     self._speech_levels = [rms]
@@ -205,6 +223,7 @@ class VoiceActivityDetector:
             if accepted:
                 st.accepted += 1
                 self.last_level = self._utterance_level()
+                self.last_span = (self._utt_start_t, t)
                 ok("VAD", f"voz {self._speech_frame_count * FRAME_MS} ms "
                    + fmt(nivel=self.last_level, ruido=self._noise_floor))
             else:
@@ -227,6 +246,10 @@ class VoiceActivityDetector:
                  ruido=self._noise_floor)
             return False
         return True
+
+    def open_span(self, now: float) -> tuple[float, float] | None:
+        """Intervalo de la utterance ABIERTA hasta `now` (None si no hay)."""
+        return (self._utt_start_t, now) if self._in_speech else None
 
     def current_level(self) -> float:
         """Nivel (p90) de la utterance ABIERTA hasta ahora (0 si no hay).
@@ -270,6 +293,10 @@ class VoiceActivityDetector:
         raw = b"".join(self._utterance)
         samples = np.frombuffer(raw, dtype=np.int16)
         return samples.astype(np.float32) / 32768.0
+
+    @staticmethod
+    def frame_rms(frame_bytes: bytes) -> float:
+        return VoiceActivityDetector._frame_rms(frame_bytes)
 
     @staticmethod
     def _frame_rms(frame_bytes: bytes) -> float:

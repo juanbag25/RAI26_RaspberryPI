@@ -1,0 +1,4 @@
+# ReSpeaker USB Mic Array v2.0 (XMOS XVF-3000): acceso a la interfaz de control
+# USB (parámetros DSP, DoA, LEDs) sin root, para respeaker.py / main.py.
+# Instalar: sudo cp 99-respeaker.rules /etc/udev/rules.d/ && sudo udevadm control --reload && sudo udevadm trigger
+SUBSYSTEM=="usb", ATTR{idVendor}=="2886", ATTR{idProduct}=="0018", MODE="0664", GROUP="plugdev"

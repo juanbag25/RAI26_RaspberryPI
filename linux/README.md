@@ -8,7 +8,11 @@ For the project overview, model sizes and tuning notes, see the [root README](..
 
 - Raspberry Pi 5 (4 GB or 8 GB)
 - Raspberry Pi OS 64-bit (Bookworm)
-- USB conference microphone (USB Audio Class compliant)
+- **ReSpeaker USB Mic Array v2.0** (XMOS XVF-3000, 4 mics, firmware de 6
+  canales) — ver [Mic array](#mic-array-respeaker-usb-mic-array-v20). Sin él
+  funciona con cualquier mic USB (mono), sin foco por dirección.
+- **Sin parlante**: la Pi no emite sonido. Todo lo audible (respuestas, «Sí,
+  dime», chimes) sale por el parlante de la Jetson (orquestador).
 
 ## 1. Get the code onto the Pi
 
@@ -47,6 +51,16 @@ sudo usermod -a -G audio "$USER"
 ```
 
 Log out and back in (or reboot) so the `audio` group membership takes effect.
+
+Con el ReSpeaker, además, permiso sobre su interfaz de control USB (DoA,
+parámetros DSP, LEDs) sin root:
+
+```bash
+sudo cp linux/99-respeaker.rules /etc/udev/rules.d/
+sudo udevadm control --reload && sudo udevadm trigger
+sudo usermod -a -G plugdev "$USER"   # y volver a loguearse
+python linux/respeaker.py            # tiene que listar los parámetros
+```
 
 ## 3. Python environment
 
@@ -90,8 +104,7 @@ unzip vosk-model-small-es-0.42.zip && rm vosk-model-small-es-0.42.zip
 ```
 
 Si falta, `main.py` avisa y arranca en `WAKE_MODE=text` (funciona igual, más
-lento). Probalo solo con `python wake_spotter.py` y el beep con
-`python wake_sound.py`.
+lento). Probalo solo con `python wake_spotter.py`.
 
 ## 5. Configure the `.env`
 
@@ -152,9 +165,101 @@ se pierde, el mute expira solo a los `MUTE_TIMEOUT_S` segundos.
 Mapa completo de IPs/puertos del sistema: ver `docs/NETWORKING.md` en el repo
 principal (R-AI-026).
 
+## Mic array: ReSpeaker USB Mic Array v2.0
+
+Si está conectado, `main.py` lo detecta solo (`RESPEAKER_ENABLED=false` lo
+ignora). Firmware de 6 canales, 16 kHz (verificado: viene así de fábrica):
+
+| Canal | Qué es | Para qué se usa |
+|---|---|---|
+| ch0 | audio procesado por el chip: beamforming + supresión de ruido + AGC | spotter de «oye rai» y Whisper (se transcribe mejor que los crudos) |
+| ch1-4 | los 4 mics crudos | **nivel** del filtro de cercanía (sin AGC: el AGC de ch0 subía 2-5x a la gente lejana) |
+| ch5 | lo que el array reproduce por su jack | nada (siempre 0: el parlante está en la Jetson) |
+
+Por la interfaz de control USB ([`respeaker.py`](respeaker.py)):
+
+- **Parámetros DSP**, fijados en cada arranque porque el chip los olvida al
+  cortarle la corriente (`RESPEAKER_PARAMS`): eco apagado (no hay referencia
+  del parlante), pasa-altos a 125 Hz (retumbe de motores), supresión de ruido
+  estacionaria y no estacionaria, AGC. `python respeaker.py` lista todos;
+  `python respeaker.py NOMBRE VALOR` prueba uno al vuelo.
+- **Dirección de la voz (DoA)** a ~20 lecturas/s, con el VAD del chip.
+- **LEDs**: apagados dormido; despierto, el firmware ilumina hacia la voz.
+
+### Foco por dirección
+
+Al oír «oye rai» el robot fija la **dirección** de quien lo dijo, y mientras
+dure la ventana sólo atiende frases que vengan de ahí ([`doa.py`](doa.py)):
+
+```
+SPOT  ✓ oí «oye ray»
+WAKE  ✓ DESPIERTO por audio, ventana 25s
+DOA   ✓ foco en 32° (14 lecturas con voz)
+>>> (otra persona, del otro lado)  ¿y eso qué es?
+DOA   ✗ DESCARTADO fuera de foco  dir=205° foco=32°±35 en_foco=8% lecturas=17
+>>> (la persona del foco, más bajo)  vení para acá
+STT   · «Vení para acá.» (0.58s)
+>>> (la otra persona)  oye rai
+DOA   ✓ NUEVO FOCO dir 32°→205° (12 lecturas)
+```
+
+Medido con el array real: cuando hay voz, ~2/3 de las lecturas caen a pocos
+grados de la persona y ~1/3 son reflexiones de la sala; en silencio el ángulo
+queda pegado al último valor. Por eso sólo se usan lecturas con voz y se exige
+una **fracción** dentro del foco (`DOA_MIN_IN_FOCUS`, 40 %), no que toda la
+frase lo esté. Una frase con menos de `DOA_MIN_SAMPLES` lecturas no se juzga
+(se acepta).
+
+- **Traspaso**: otro «oye rai» estando despierto pasa el foco a quien lo dijo
+  (el robot contesta «Sí, dime» de nuevo), siempre que suene cerca (filtro de
+  cercanía general) o venga del foco actual. Un «rai» lejano no se lo roba.
+- **No hace falta hablar tan fuerte como el «oye rai»**: con el array no hay
+  exigencia de nivel relativa al wake (`ATTENTION_LEVEL_RATIO_ARRAY=0`); sin
+  array, la referencia es la primera instrucción, no el wake.
+- **Ruido propio del robot**: los ventiladores y motores están fijos respecto
+  del array. Frases que vienen mayormente de `DOA_BLOCKED_SECTORS` se
+  descartan siempre (y no despiertan).
+
+### Calibración en el robot (montado, en el lugar donde trabaja)
+
+```bash
+python linux/mic_level.py --doa
+```
+
+1. Hablale **de frente**: si la dirección no da ~0°, poné el valor `chip=` en
+   `DOA_FORWARD_OFFSET_DEG`.
+2. Robot prendido (ventiladores; y caminando) **sin nadie hablando**, Ctrl+C:
+   los picos del histograma son ruido propio -> `DOA_BLOCKED_SECTORS`
+   (ej. `170-200,350-10`).
+3. Recalibrá `NEAR_RMS_THRESHOLD` como dice *Foco del mic* (abajo): el nivel
+   ahora es el de los mics crudos, ~10 dB más bajo que el del mic viejo.
+4. Prueba: A dice «oye rai» y una instrucción más bajo -> se acepta; B, desde
+   otro lado, sin wake -> `DOA ✗ fuera de foco`; B dice «oye rai» -> `NUEVO
+   FOCO`.
+
+```bash
+DOA_FORWARD_OFFSET_DEG=0
+DOA_BLOCKED_SECTORS=
+DOA_TOLERANCE_DEG=35      # cuánto puede apartarse una lectura del foco
+DOA_MIN_IN_FOCUS=0.4      # bajalo si te ignora; subilo si entran otras voces
+RESPEAKER_PARAMS=AGCMAXGAIN=10,HPFONOFF=3   # pisa parámetros DSP
+```
+
+### Orden de corte mientras el robot habla (experimental)
+
+Por default, mientras el robot habla el mic se descarta entero
+(`SPEAK_LISTEN_MODE=mute`). Con `SPEAK_LISTEN_MODE=keyword` el spotter sigue
+escuchando **sólo** «para rai» / «basta rai» (`SPEAK_STOP_PHRASES`) o «oye
+rai»: si viene de fuera del sector del parlante (`DOA_SPEAKER_SECTOR`, se mide
+con `mic_level.py --doa` mientras el robot habla) y suena `SPEAK_BARGE_RATIO`
+veces más fuerte que el parlante, le manda `stop` al orquestador, que se calla
+(y con «oye rai», además contesta «Sí, dime»). Dejarlo en `mute` hasta probar
+que no se corta solo.
+
 ## Foco del mic (rechazo de campo lejano)
 
-El mic es omnidireccional y webrtcvad sólo sabe decir "esto es voz humana", no
+Este filtro corre siempre, con o sin array (con el ReSpeaker, sobre el nivel
+de los mics crudos). El mic es omnidireccional y webrtcvad sólo sabe decir "esto es voz humana", no
 "esto me lo están diciendo a mí": sin filtro, una charla del otro lado de la
 sala abre utterances y Whisper las transcribe (o alucina sobre ellas). Encima
 del VAD hay entonces un filtro de **energía** en dos etapas ([`vad.py`](vad.py)),
@@ -206,13 +311,14 @@ NEAR_SNR_RATIO=3
 
 El robot descarta todo hasta que alguien lo llama. Hay dos modos (`WAKE_MODE`):
 
-### Modo `audio` (default): spotter local + beep
+### Modo `audio` (default): spotter local + «Sí, dime»
 
 Como un celular con Siri: un detector chico corre **siempre** sobre el audio
 ([`wake_spotter.py`](wake_spotter.py), Vosk con gramática cerrada), y mientras
-el robot duerme **no se manda nada a Groq**. Al reconocer "oye rai" suena un
-beep ([`wake_sound.py`](wake_sound.py)), el robot se despierta en ~0.3 s y
-recién ahí las frases van a Groq.
+el robot duerme **no se manda nada a Groq**. Al reconocer "oye rai" la Pi le
+avisa al orquestador (`@@event:awake`) y el robot contesta **«Sí, dime»** por
+el parlante de la Jetson (frase pre-generada, ~0.6 s; la Pi está muteada
+mientras suena). Recién ahí las frases van a Groq.
 
 ```
 >>> ¿viste el partido de ayer?
@@ -220,9 +326,9 @@ VAD   ✓ voz 1200 ms nivel=0.0812 ruido=0.0041
 WAKE  ✗ DESCARTADO dormido: no transcribo hasta oír «oye rai»  nivel=0.0812
 >>> oye rai
 SPOT  ✓ oí «oye ray»
-WAKE  ✓ DESPIERTO por audio, 25s foco=0.1547 minimo=0.0928
+WAKE  ✓ DESPIERTO por audio, ventana 25s
 VAD   ✗ DESCARTADO era el «oye rai», no hace falta transcribirlo  voz_ms=780
-   *beep*
+   (robot: «Sí, dime»)
 >>> vení para acá
 VAD   ✓ voz 900 ms nivel=0.1490 ruido=0.0041
 STT   · «Vení para acá.» (0.61s)
@@ -234,17 +340,14 @@ NET   ✓ enviado «Vení para acá.» (0.01s)
   disparar como "oye ray". "rai" no es palabra del español y sale como
   "ray"/"rey"; por eso las tres variantes están en el default.
 - Decir "oye rai" mientras ya está despierto re-engancha el foco a quien lo
-  dijo (y suena el beep otra vez).
-- Mientras suena el beep el mic se ignora (~230 ms) para no transcribirse el
-  propio beep. Si no hay parlante, `WAKE_SOUND=none` (o se desactiva solo al
-  fallar) y el wake funciona igual.
-- Además del beep local, cada cambio despierto/dormido se le avisa al
-  orquestador (`@@event:awake` / `@@event:asleep` por el mismo socket del
-  texto) y **él** hace sonar un chime por el parlante del robot: agudo al
-  empezar a escuchar, grave cuando vence la ventana (`WAKE_WINDOW_S`) y se
-  duerme. `WAKE_EVENTS_ENABLED=false` lo apaga; el volumen se fija allá
-  (`TTS_CHIME_VOLUME` en el `.env` del orquestador).
-- El texto que llega a Groq después del beep pasa igual por el filtro de
+  dijo (y el robot contesta «Sí, dime» otra vez): otra persona puede tomar la
+  palabra sin esperar a que se duerma.
+- Eventos al orquestador (mismo socket del texto, prefijo `@@event:`):
+  `awake` en **cada** wake, `asleep` cuando vence la ventana (`WAKE_WINDOW_S`;
+  el orquestador hace sonar un chime grave), `doa:<grados>` con la dirección
+  fijada y `stop` (orden de corte). Todo lo que suena manda
+  `SPEAK_START`/`SPEAK_END`, así el mic no se escucha a sí mismo.
+- El texto que llega a Groq después del wake pasa igual por el filtro de
   texto de abajo: si Whisper escribe "rai vení" se recorta a "vení".
 
 ### Modo `text`: sobre la transcripción
@@ -287,11 +390,9 @@ Desde `linux/.env`:
 WAKE_WORD_ENABLED=true    # false = como antes, atiende todo lo que pasa el VAD
 WAKE_MODE=audio           # audio | text
 WAKE_PHRASES=oye rai,oye ray,oye rey   # agregá "hola rai", "che rai"...
-WAKE_SOUND=beep           # beep | none | /ruta/ding.wav
-AUDIO_OUTPUT_DEVICE=      # parlante para el beep (índice de sounddevice)
-WAKE_EVENTS_ENABLED=true  # chime remoto (parlante del orquestador) al despertar/dormirse
 WAKE_WINDOW_S=25
-ATTENTION_LEVEL_RATIO=0.6 # 0.8 = más cerrado sobre quien lo llamó; 0 = off
+ATTENTION_LEVEL_RATIO=0.25      # sin array: nivel mínimo relativo a la conversación; 0 = off
+ATTENTION_LEVEL_RATIO_ARRAY=0   # con array manda la dirección
 ```
 
 ## Tuning
@@ -300,7 +401,8 @@ All knobs live in [`linux/config.py`](config.py): `BACKEND`, `MODEL_SIZE`,
 `LANGUAGE`, `STT_PROMPT`, `VAD_AGGRESSIVENESS`, `SILENCE_MS`,
 `PRE_SPEECH_PADDING_MS`, `MIN_UTTERANCE_MS`, los del foco del mic
 (`RMS_THRESHOLD`, `NEAR_RMS_THRESHOLD`, `NEAR_SNR_RATIO`, `ONSET_SPEECH_FRAMES`,
-`NOISE_FLOOR_*`) y los del wake word (`WAKE_*`, `AUDIO_OUTPUT_DEVICE`). Los más
+`NOISE_FLOOR_*`), los del wake word (`WAKE_*`, `ATTENTION_*`), los del array
+(`RESPEAKER_*`, `DOA_*`) y los de mientras habla (`SPEAK_*`). Los más
 usados se pueden pisar desde `linux/.env` — ver `.env.example`. Para el resto,
 ver el root README.
 
@@ -426,8 +528,10 @@ cae bajo carga: probar cable más corto/grueso.
   `NEAR_SNR_RATIO`) con `mic_level.py` en la mano; el wake word tapa el resto.
 - **High CPU / slow transcription** — on a Pi 5, stick to `tiny`, `base` or `small` for the local backend, or use the Groq backend.
 - **No despierta con "oye rai"** — mirá `spotter oyó «…»` en la línea `HB`: es lo último que Vosk entendió. Si dice `«oye»` y nunca `«oye ray»`, probá `LOG_DEBUG=1` y `python wake_spotter.py`, hablá más cerca, o agregá la variante que veas a `WAKE_PHRASES`. Si aparece `spotter atrasado`, la Pi no da abasto.
-- **Despierta solo** — sacá variantes de `WAKE_PHRASES` (dejá sólo `oye rai,oye ray`) o subí `WAKE_COOLDOWN_S`. Si hay un parlante cerca del mic, bajá `WAKE_SOUND_VOLUME`.
-- **No suena el beep** — `python wake_sound.py`; si falla, elegí el parlante con `AUDIO_OUTPUT_DEVICE` (mismo listado que el mic al arrancar) o `WAKE_SOUND=none`.
+- **Despierta solo** — sacá variantes de `WAKE_PHRASES` (dejá sólo `oye rai,oye ray`) o subí `WAKE_COOLDOWN_S`.
+- **`DOA ✗ fuera de foco` contra quien lo llamó** — bajá `DOA_MIN_IN_FOCUS` (0.3) o subí `DOA_TOLERANCE_DEG`; mirá con `mic_level.py --doa` cuánto se dispersa el ángulo en esa sala.
+- **`DoA CAÍDO` en el heartbeat / `ReSpeaker ... no responde por USB`** — permisos: falta la regla udev (sección 2) o el grupo `plugdev`. `python respeaker.py` lo confirma.
+- **El ReSpeaker no aparece como 6 canales** — `arecord -D plughw:<card>,0 --dump-hw-params -d 1 /dev/null` tiene que decir `CHANNELS: 6`; si dice 1, tiene el firmware de 1 canal (flashear el de 6 con `dfu.py` de `respeaker/usb_4_mic_array`).
 
 ## Probar con tu PC como orquestador (Tailscale)
 

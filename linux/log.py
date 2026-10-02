@@ -83,7 +83,8 @@ _TAG_COLORS = {
     "STT": _BRIGHT_BLUE,      # transcripción (Groq / Whisper)
     "NET": _BRIGHT_GREEN,     # envío al orquestador
     "CTRL": _WHITE,           # SPEAK_START / SPEAK_END del orquestador
-    "SOUND": _DIM,            # beep local
+    "ARRAY": _BLUE,           # ReSpeaker: parámetros DSP, LEDs, lecturas USB
+    "DOA": _BRIGHT_CYAN,      # dirección de la voz y foco espacial
     "HB": _DIM,               # heartbeat
     "POWER": _DIM,
     "MAIN": _WHITE,
