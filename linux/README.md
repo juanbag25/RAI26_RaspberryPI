@@ -245,6 +245,11 @@ Avisa si algo salió raro (alguien habló en un paso de silencio, cerca y lejos
 suenan parecido, el spotter no reconoce el «oye rai»). Sin ReSpeaker calibra
 sólo los niveles.
 
+Ningún umbral de nivel puede quedar por encima del **60 % de tu voz
+cercana** (paso «de frente»): ni el ruido del ambiente ni el de marcha los
+empujan más arriba, porque el robot dejaría de escucharte. Si el ruido llega
+a ese techo, la calibración avisa en vez de subir el umbral.
+
 **A mano**, si querés ver los números en vivo:
 
 ```bash
@@ -269,6 +274,26 @@ DOA_TOLERANCE_DEG=35      # cuánto puede apartarse una lectura del foco
 DOA_MIN_IN_FOCUS=0.4      # bajalo si te ignora; subilo si entran otras voces
 RESPEAKER_PARAMS=AGCMAXGAIN=10,HPFONOFF=3   # pisa parámetros DSP
 ```
+
+### Ruido del robot caminando
+
+El ruido de marcha (pasos, motores, vibración del cuerpo) es casi tan fuerte
+como una voz cercana, así que **subir umbrales no lo resuelve**: si el umbral
+supera al ruido, también supera a la persona. Lo que sí ayuda, de mayor a
+menor impacto:
+
+1. **Montaje del mic**: gran parte del ruido de marcha entra como vibración
+   por la estructura, no por el aire. El array va sobre goma/espuma (no
+   atornillado rígido al cuerpo), lo más arriba posible y lejos de motores y
+   ventiladores.
+2. **Filtros del chip** (sin tocar código, `RESPEAKER_PARAMS` en `.env`):
+   pasa-altos más alto `HPFONOFF=3` (180 Hz, corta golpes graves de los
+   pasos) y más supresión de ruido no estacionario `GAMMA_NN=1.5`, `MIN_NN=0.2`.
+   Probalo con `python respeaker.py NOMBRE VALOR` antes de dejarlo fijo.
+3. **Dirección**: el ruido de marcha no viene de un punto fijo, así que sus
+   lecturas de DoA se dispersan y no llegan al `DOA_MIN_IN_FOCUS` del foco.
+4. **Hablarle cerca**: con el robot en marcha la diferencia la hace la
+   distancia; la calibración avisa si el ruido llega a tu voz.
 
 ### Orden de corte mientras el robot habla (experimental)
 

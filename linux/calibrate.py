@@ -39,6 +39,8 @@ import numpy as np
 from audio_capture import LinuxAudioCapture
 from config import (
     DOA_POLL_HZ,
+    NEAR_SNR_RATIO,
+    NOISE_FLOOR_MAX,
     DOA_TOLERANCE_DEG,
     FRAME_MS,
     RESPEAKER_ENABLED,
@@ -356,7 +358,7 @@ def main() -> int:
             say(f"  parlante: {fmt_sectors(spk_sec) or 'no se ubicó (¿sonó?)'}")
 
     # Niveles.
-    if near and near.p(90) < max(0.02, 3 * (noise or 0.0)):
+    if near and near.p(90) < max(0.02, 1.5 * (noise or 0.0)):
         notes.append(f"en 'cerca' casi no hubo voz (p90={near.p(90):.4f}): no calibro niveles "
                      "ni el frente; repetí ese paso hablando todo el tiempo")
         near = None
@@ -364,37 +366,52 @@ def main() -> int:
             values.pop(key, None)
     if near:
         p90_near = near.p(90)
-        floor = max(noise or 0.0, (walk.p(50) if walk else 0.0))
+        # Techo de TODO umbral de nivel: por encima del 60 % de tu voz cercana
+        # el robot te ignora. El ruido (ambiente o de marcha) nunca empuja los
+        # umbrales sobre esto: si se acerca, se avisa (el trabajo lo tienen que
+        # hacer la dirección y el resto del pipeline, no el nivel).
+        ceiling = p90_near * 0.6
         if far:
             p90_far = far.p(90)
-            lo, hi = p90_far * 2, p90_near * 0.6
-            if lo <= hi:
-                near_thr = lo
+            if p90_far * 2 <= ceiling:
+                near_thr = p90_far * 2
             else:
-                near_thr = float(np.sqrt(p90_far * p90_near))
+                near_thr = min(ceiling, float(np.sqrt(p90_far * p90_near)))
                 notes.append(f"cerca ({p90_near:.4f}) y lejos ({p90_far:.4f}) están muy parejos: "
                              "el nivel separa poco, el trabajo lo hace la dirección")
         else:
             near_thr = p90_near * 0.5
             notes.append("sin paso 'lejos': NEAR_RMS_THRESHOLD = mitad del nivel cerca")
-        near_thr = max(near_thr, floor * 2)
+        if noise is not None and noise * 2 > near_thr:
+            # Ambiente quieto: el umbral tiene que quedar sobre él, sin pasar el techo.
+            near_thr = min(ceiling, noise * 2)
+            if noise * 2 > ceiling:
+                notes.append(f"el ambiente quieto ({noise:.4f}) ya está cerca de tu voz: "
+                             "acercá el mic a quien habla o alejalo de los ventiladores")
         values["NEAR_RMS_THRESHOLD"] = f"{near_thr:.4f}"
         if noise is not None:
             # Piso absoluto para abrir: holgado sobre el ambiente (mediana:
             # robusta a una voz suelta durante el paso).
             values["RMS_THRESHOLD"] = f"{min(near_thr * 0.6, max(0.005, quiet.p(50) * 3)):.4f}"
+
+        # Con ruido, el umbral efectivo es max(NEAR_RMS_THRESHOLD, piso ×
+        # NEAR_SNR_RATIO), y el piso puede subir hasta NOISE_FLOOR_MAX. Ese
+        # máximo también tiene que quedar bajo el techo, o caminando te ignora.
+        snr = NEAR_SNR_RATIO
+        floor_max = NOISE_FLOOR_MAX
         if walk:
             walk_floor = walk.p(50)
-            # Tope del piso de ruido: el ruido típico caminando, con margen.
-            values["NOISE_FLOOR_MAX"] = f"{max(0.01, walk.p(50) * 1.5):.4f}"
-            # Caminando, el umbral efectivo es ruido × NEAR_SNR_RATIO: tiene
-            # que quedar por debajo de tu voz.
             snr = min(3.0, max(1.5, 0.5 * p90_near / max(walk_floor, 1e-4)))
-            values["NEAR_SNR_RATIO"] = f"{snr:.1f}"
-            if snr <= 1.5:
-                notes.append("caminando, el ruido llega casi a tu voz: hay que hablarle más "
-                             "cerca/fuerte con el robot en marcha")
-    else:
+            floor_max = max(0.01, walk_floor * 1.5)
+            if walk_floor * snr > ceiling:
+                notes.append(f"caminando, el ruido ({walk_floor:.4f}) llega casi a tu voz "
+                             f"({p90_near:.4f}): con el robot en marcha hay que hablarle más "
+                             "cerca/fuerte (o aislar el mic de la vibración, ver README: «Ruido del robot caminando»)")
+        floor_max = min(floor_max, ceiling / snr)
+        values["NEAR_SNR_RATIO"] = f"{snr:.1f}"
+        values["NOISE_FLOOR_MAX"] = f"{floor_max:.4f}"
+        say(f"  techo de los umbrales (60 % de tu voz cercana): {ceiling:.4f}")
+    elif "near" not in takes:
         notes.append("sin paso 'cerca' no puedo calibrar los niveles")
 
     if wake_hits is not None:
@@ -407,14 +424,15 @@ def main() -> int:
         array.stop_polling()
 
     say()
+    if values:
+        say("Valores calibrados:")
+        for k, v in values.items():
+            say(f"  {k}={v}")
+    for n in notes:
+        say(f"  ! {n}")
     if not values:
         say("No hay nada para guardar.")
         return 1
-    say("Valores calibrados:")
-    for k, v in values.items():
-        say(f"  {k}={v}")
-    for n in notes:
-        say(f"  ! {n}")
     say()
     if args.dry_run:
         say("(--dry-run: no escribo .env)")
