@@ -76,10 +76,16 @@ class VadStats:
     opened: int = 0               # utterances abiertas
     accepted: int = 0             # cerradas y aceptadas (van a Whisper)
     rejected: int = 0             # cerradas y descartadas (cortas/lejanas)
+    weak: int = 0                 # ráfagas de voz que no llegaron a abrir
 
     @property
     def mean_rms(self) -> float:
         return self.sum_rms / self.frames if self.frames else 0.0
+
+
+# Silencio que separa una ráfaga de voz floja de la siguiente (para reportarla
+# una vez y no por frame).
+_WEAK_GAP_MS = 400
 
 
 def _make_speech_detector():
@@ -117,6 +123,13 @@ class VoiceActivityDetector:
         # aceptada: main.py lo cruza con las muestras de DoA.
         self.last_span: tuple[float, float] | None = None
         self._utt_start_t = 0.0
+        # Voz que el detector oyó pero que NO abrió utterance (floja, o sin
+        # los ONSET_SPEECH_FRAMES seguidos). Antes sólo salía en debug y desde
+        # afuera parecía que el robot "ni registró" la voz: ahora, al terminar
+        # la ráfaga, una línea DESCARTADO con su nivel vs el umbral.
+        self._weak_frames = 0
+        self._weak_gap = 0
+        self._weak_max_rms = 0.0
         self._stats = VadStats()
         self._reset_utterance()
         dim("VAD", f"voz={self.engine} filtro: abre>={RMS_THRESHOLD} cerca>={NEAR_RMS_THRESHOLD} "
@@ -221,6 +234,7 @@ class VoiceActivityDetector:
         self._track_window_floor(rms)
 
         if not self._in_speech:
+            self._track_weak(is_speech, rms)
             self._pre_buffer.append(frame_bytes)
             if is_speech and rms >= self.open_threshold():
                 self._onset_count += 1
@@ -233,6 +247,7 @@ class VoiceActivityDetector:
                     self._silence_count = 0
                     self._speech_frame_count = self._onset_count
                     self._speech_levels = [rms]
+                    self._reset_weak()
                     st.opened += 1
                     dim("VAD", "▶ voz " + fmt(rms=rms, abre=self.open_threshold()))
             else:
@@ -274,6 +289,31 @@ class VoiceActivityDetector:
             self._reset_utterance()
             return (accepted, audio)
         return False, None
+
+    def _reset_weak(self) -> None:
+        self._weak_frames = 0
+        self._weak_gap = 0
+        self._weak_max_rms = 0.0
+
+    def _track_weak(self, is_speech: bool, rms: float) -> None:
+        """Acumula la voz que no llega a abrir; al cortarse (WEAK_GAP_MS sin
+        voz), si duró >= MIN_UTTERANCE_MS, la reporta una vez."""
+        if is_speech:
+            self._weak_frames += 1
+            self._weak_gap = 0
+            self._weak_max_rms = max(self._weak_max_rms, rms)
+            return
+        if not self._weak_frames:
+            return
+        self._weak_gap += 1
+        if self._weak_gap * FRAME_MS < _WEAK_GAP_MS:
+            return
+        if self._weak_frames >= self._min_speech_frames:
+            drop("VAD", "oí voz pero no llegó a abrir (floja o entrecortada)",
+                 voz_ms=self._weak_frames * FRAME_MS, rms_max=self._weak_max_rms,
+                 abre=self.open_threshold(), ruido=self._noise_floor)
+            self._stats.weak += 1
+        self._reset_weak()
 
     def _utterance_accepted(self) -> bool:
         """Segunda etapa del filtro: ¿fue voz real y de cerca?"""

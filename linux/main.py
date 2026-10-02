@@ -422,6 +422,9 @@ def heartbeat_worker(
         if st.opened or st.accepted or st.rejected:
             parts.append(f"utt ok={st.accepted} desc={st.rejected}"
                          + (" (una abierta)" if vad.in_speech else ""))
+        if st.weak:
+            parts.append(f"voz floja sin abrir x{st.weak}")
+            problem = True
 
         # 4. Totales del proceso.
         totals = f"total stt={counters.transcribed} env={counters.sent}"
