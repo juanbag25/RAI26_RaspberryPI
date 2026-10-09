@@ -194,12 +194,20 @@ class OrchestratorLink:
              f"por {ORCHESTRATOR_RETRY_S:g}s")
         return False
 
-    def send_transcript(self, text: str, stt_confidence: float) -> bool:
+    def send_transcript(self, text: str, stt_confidence: float,
+                        pi_latency_s: float | None = None) -> bool:
         """Envuelve una transcripción (texto + confianza del STT) en JSON. Los
         eventos de wake (`ORCH_EVENT_PREFIX`) NO pasan por acá: siguen yendo
         como string plano, que es como el orquestador los distingue de una
-        transcripción."""
-        return self.send(json.dumps({"text": text, "stt_confidence": stt_confidence}))
+        transcripción.
+
+        `pi_latency_s`: desde que el VAD cerró la frase hasta este envío
+        (cola + STT + huella de voz). El orquestador sólo lo loguea, para
+        ver de punta a punta cuánto tarda cada turno."""
+        payload = {"text": text, "stt_confidence": stt_confidence}
+        if pi_latency_s is not None:
+            payload["pi_latency_s"] = round(pi_latency_s, 3)
+        return self.send(json.dumps(payload))
 
 
 def config_snapshot() -> dict:
@@ -282,6 +290,11 @@ def transcribe_worker(
     judge_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="speaker")
     mixer = MixTrimmer(speaker)
 
+    def timed_judge(audio):
+        t0 = time.monotonic()
+        verdict = speaker.judge(audio)
+        return verdict, time.monotonic() - t0
+
     def process(item, rec: dict) -> str:
         """Una utterance: STT + voz + wake + envío. Devuelve su destino
         (outcome del evento "stt" del log persistente) y va llenando `rec`."""
@@ -320,14 +333,18 @@ def transcribe_worker(
         # La frase del «oye rai» (wake_prefix) es la referencia misma: no se
         # compara. Dormido no hay referencia contra la cual comparar.
         judging = speaker.enabled and wake.is_awake() and not wake_prefix and trimmed is None
-        verdict = judge_pool.submit(speaker.judge, audio) if judging else None
+        verdict = judge_pool.submit(timed_judge, audio) if judging else None
         t0 = time.monotonic()
         text, stt_confidence = transcriber.transcribe(audio)
         elapsed = time.monotonic() - t0
         counters.transcribed += 1
         rec.update(text=text, stt_s=round(elapsed, 3), conf=stt_confidence)
         if verdict is not None:
-            verdict = verdict.result()
+            # spk_wait_s: lo que la huella de voz atrasó la frase (corre en
+            # paralelo con Groq; si es > 0, la Pi es el cuello de botella).
+            t_wait = time.monotonic()
+            verdict, spk_s = verdict.result()
+            rec.update(spk_s=round(spk_s, 3), spk_wait_s=round(time.monotonic() - t_wait, 3))
             rec.update(spk_sim=verdict.similarity, spk_ok=verdict.accepted,
                        spk_why=verdict.why, spk_ref_s=round(speaker.ref_seconds(), 1),
                        voice=speaker.voice_label())
@@ -396,7 +413,9 @@ def transcribe_worker(
         if not payload:
             return "filtrada_wake"
         rec["sent_text"] = payload
-        if orchestrator.send_transcript(payload, stt_confidence):
+        pi_latency_s = time.monotonic() - queued_at
+        rec["pi_latency_s"] = round(pi_latency_s, 3)
+        if orchestrator.send_transcript(payload, stt_confidence, pi_latency_s):
             counters.sent += 1
             # No dormirse mientras el robot piensa la respuesta.
             wake.await_reply()
@@ -445,8 +464,9 @@ def transcribe_worker(
         event("stt", outcome=outcome, **rec)
 
 
-# Cada cuánto el emisor de eventos mira si hubo un wake o si se durmió. Marca
-# el retraso máximo del «Sí, dime» respecto del «oye rai» (más el TCP).
+# Cada cuánto el emisor de eventos mira si se durmió (eso es tiempo que pasa,
+# no un evento). Los wakes no esperan a este polling: `WakeWord.on_announce`
+# despierta al emisor en el momento (ver OrchestratorEvents.kick).
 WAKE_EVENT_POLL_S = 0.1
 
 
@@ -454,6 +474,9 @@ def _doa_rejected(item) -> bool:
     """¿La dirección rechazó esta frase entera? (en cola sólo para el recorte)"""
     mix = item[4]
     return mix is not None and bool(mix.doa_rejected)
+
+
+_KICK = object()  # OrchestratorEvents.kick(): no es un evento, sólo despierta el loop
 
 
 class OrchestratorEvents:
@@ -478,6 +501,10 @@ class OrchestratorEvents:
     def send(self, name: str) -> None:
         self._queue.put(name)
 
+    def kick(self) -> None:
+        """Hubo un wake: revisar ya, sin esperar el próximo polling."""
+        self._queue.put(_KICK)
+
     def start(self) -> None:
         threading.Thread(target=self._run, name="orch-events", daemon=True).start()
 
@@ -488,6 +515,8 @@ class OrchestratorEvents:
             try:
                 name = self._queue.get(timeout=WAKE_EVENT_POLL_S)
             except queue.Empty:
+                name = None
+            if name is _KICK:
                 name = None
             seq = self._wake.wake_seq()
             if seq != seen_seq:
@@ -851,6 +880,7 @@ def main() -> None:
 
     events = OrchestratorEvents(wake, orchestrator, on_asleep=on_asleep)
     if WAKE_WORD_ENABLED:
+        wake.on_announce = events.kick
         events.start()
 
     event("config", **config_snapshot(), git=_git_version(), host=socket.gethostname(),

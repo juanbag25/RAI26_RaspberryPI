@@ -82,6 +82,9 @@ class WakeWord:
         self._wake_seq = 0
         # Todos los wakes, anunciados o no (main.py: ¿esta frase despertó?).
         self._wakes = 0
+        # Se llama (fuera del lock) cada vez que sube `wake_seq`: main.py
+        # despierta al emisor de eventos para que el «Sí, dime» salga ya.
+        self.on_announce = None
 
     # -- estado ---------------------------------------------------------------
 
@@ -129,6 +132,11 @@ class WakeWord:
         """Pedir el «Sí, dime» de un wake ya abierto (ver wake_from_audio)."""
         with self._lock:
             self._wake_seq += 1
+        self._notify_announce()
+
+    def _notify_announce(self) -> None:
+        if self.on_announce is not None:
+            self.on_announce()
 
     def _renew(self) -> None:
         with self._lock:
@@ -144,6 +152,8 @@ class WakeWord:
             self._wakes += 1
             if announce:
                 self._wake_seq += 1
+        if announce:
+            self._notify_announce()
 
     def wake_seq(self) -> int:
         with self._lock:

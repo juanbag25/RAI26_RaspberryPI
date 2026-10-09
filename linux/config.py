@@ -77,10 +77,12 @@ MODEL_SIZE = "small"
 COMPUTE_TYPE = "int8"
 
 # --- Backend groq ------------------------------------------------------------
-# Opciones: "whisper-large-v3" (más preciso en español y frases cortas) o
-# "whisper-large-v3-turbo" (decoder recortado: algo más rápido, menos preciso).
+# Opciones: "whisper-large-v3-turbo" (default: decoder recortado, contesta
+# más rápido) o "whisper-large-v3" (algo más preciso en español y en frases
+# cortas tipo «sí»/«dale»). Si con turbo aparecen más transcripciones malas en
+# log_report.py, volver con GROQ_MODEL=whisper-large-v3 en el .env.
 # La API key se lee de la variable de entorno GROQ_API_KEY.
-GROQ_MODEL = _env_str("GROQ_MODEL", "whisper-large-v3")
+GROQ_MODEL = _env_str("GROQ_MODEL", "whisper-large-v3-turbo")
 
 # --- Común -------------------------------------------------------------------
 LANGUAGE = "es"
@@ -150,7 +152,11 @@ SILERO_THRESHOLD = _env_float("SILERO_THRESHOLD", 0.5)
 SILERO_MODEL_NAME = _env_str("SILERO_MODEL_NAME", "silero_vad.onnx")
 # Sólo para VAD_ENGINE=webrtc (0-3).
 VAD_AGGRESSIVENESS = 3
-SILENCE_MS = 700
+# Silencio que cierra la frase: es tiempo muerto fijo en cada turno antes de
+# que arranque el STT. Si corta a la gente que hace pausas largas, el
+# orquestador igual junta los pedazos (UTTERANCE_MERGE_WINDOW_S); subilo
+# (700) si aun así se parten demasiado.
+SILENCE_MS = int(_env_float("SILENCE_MS", 500))
 # De los SILENCE_MS de silencio que cierran la frase, cuánto se manda a
 # Whisper. El resto se recorta: con cola larga de silencio/ruido Whisper
 # tiende a inventar un final ("gracias", "...y nada").
