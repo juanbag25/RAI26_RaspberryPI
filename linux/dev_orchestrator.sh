@@ -57,7 +57,23 @@ stop_running() {
         # sudo: si lo lanzó un servicio como root, kill sin sudo falla callado.
         # shellcheck disable=SC2086
         sudo kill $pids 2>/dev/null || true
-        sleep 1
+        # main.py trata SIGTERM como Ctrl+C y corre el finally (aprende la
+        # conversación, apaga LEDs): puede tardar varios segundos. Esperar
+        # hasta 10 s y recién ahí forzar con -9.
+        local i alive
+        for i in $(seq 1 20); do
+            alive=""
+            # shellcheck disable=SC2086
+            for p in $pids; do sudo kill -0 "$p" 2>/dev/null && alive="$alive $p"; done
+            [ -z "$alive" ] && break
+            sleep 0.5
+        done
+        if [ -n "$alive" ]; then
+            log "no terminaron en 10 s, forzando (kill -9:$alive)"
+            # shellcheck disable=SC2086
+            sudo kill -9 $alive 2>/dev/null || true
+            sleep 0.5
+        fi
     fi
     # Si el puerto de control sigue tomado, hay OTRO main.py que no vimos
     # (servicio con otro nombre). Mejor frenar acá que arrancar y explotar.
