@@ -7,3 +7,4 @@ python-dotenv
 vosk
 pyusb
 onnxruntime
+sherpa-onnx

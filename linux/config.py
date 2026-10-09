@@ -378,6 +378,29 @@ ATTENTION_LEVEL_RATIO = _env_float("ATTENTION_LEVEL_RATIO", 0.25)
 ATTENTION_LEVEL_RATIO_ARRAY = _env_float("ATTENTION_LEVEL_RATIO_ARRAY", 0.0)
 ATTENTION_FOLLOW_ALPHA = 0.3
 
+# --- Verificación de hablante (speaker_id.py) -----------------------------------
+# Despierto, sólo se transcribe lo que dice la MISMA VOZ que dijo «oye rai»
+# (huella de voz, no volumen): las voces de fondo se descartan aunque lleguen
+# fuertes, y por eso el umbral de nivel puede quedar más bajo. Necesita
+# sherpa-onnx y el modelo en models/ (ver README); si falta, se desactiva solo.
+SPEAKER_VERIFY_ENABLED = _env_bool("SPEAKER_VERIFY_ENABLED", True)
+# TitaNet-small (NVIDIA NeMo, ONNX de sherpa-onnx). Medido en LibriSpeech:
+# otra persona da similitud ~0.07 (p95 0.27); la misma, 0.55-0.85 según
+# cuánto audio haya en la referencia.
+SPEAKER_MODEL_NAME = _env_str("SPEAKER_MODEL_NAME", "nemo_en_titanet_small.onnx")
+# Similitud coseno mínima con la referencia para aceptar la frase (0-1).
+# Calibrar con `python speaker_id.py`. Bajala (0.25) si te ignora a vos;
+# subila (0.45) si entran otras voces.
+SPEAKER_MIN_SIMILARITY = _env_float("SPEAKER_MIN_SIMILARITY", 0.35)
+# Con menos audio que esto el «oye rai» no sirve de referencia: la toma la
+# primera frase aceptada (la decide el nivel, como antes).
+SPEAKER_MIN_REF_S = _env_float("SPEAKER_MIN_REF_S", 0.8)
+# Frases más cortas que esto ("sí", "no") no se comparan: la huella de 0.5 s
+# no es confiable. Pasan (las filtra el nivel).
+SPEAKER_MIN_AUDIO_S = _env_float("SPEAKER_MIN_AUDIO_S", 0.7)
+# Tope de audio de la referencia (el «oye rai» + las últimas frases aceptadas).
+SPEAKER_REF_MAX_S = _env_float("SPEAKER_REF_MAX_S", 8.0)
+
 # --- Mientras el robot habla ----------------------------------------------------
 # "mute": se descarta todo el audio (como siempre).
 # "keyword": se sigue descartando todo, salvo una ORDEN DE CORTE
@@ -400,3 +423,4 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(_HERE, "..", "models", f"faster-whisper-{MODEL_SIZE}")
 WAKE_MODEL_PATH = os.path.join(_HERE, "..", "models", WAKE_MODEL_NAME)
 SILERO_MODEL_PATH = os.path.join(_HERE, "..", "models", SILERO_MODEL_NAME)
+SPEAKER_MODEL_PATH = os.path.join(_HERE, "..", "models", SPEAKER_MODEL_NAME)

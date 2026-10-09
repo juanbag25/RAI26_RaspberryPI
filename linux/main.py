@@ -6,6 +6,7 @@ import struct
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -20,6 +21,8 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 from collections import deque
+
+import numpy as np
 
 from audio_capture import AudioFrame, LinuxAudioCapture
 from battery import POWER_LOG_S, report_power
@@ -41,6 +44,7 @@ from config import (
     SPEAK_BARGE_RATIO,
     SPEAK_LISTEN_MODE,
     SPEAK_STOP_PHRASES,
+    SPEAKER_MIN_SIMILARITY,
     STT_PROMPT,
     WAKE_ACK_DECIDE_MS,
     WAKE_DOA_WINDOW_S,
@@ -54,6 +58,7 @@ from ctrl_server import SpeakMute, start_in_background
 from doa import DoaFocus, DoaReading, in_any_sector, parse_sectors, to_robot_frame
 from log import DEBUG, dbg, dim, drop, err, fmt, info, ok, warn
 from respeaker import ReSpeaker
+from speaker_id import SpeakerLock, load_embedder
 from vad import VoiceActivityDetector
 from wake_word import WakeWord, normalize
 
@@ -166,6 +171,7 @@ class Counters:
         self.off_focus = 0      # utterances descartadas por dirección (DoA)
         self.barge_ins = 0      # órdenes de corte enviadas mientras el robot hablaba
         self.dropped_stale = 0  # utterances descartadas por vieja/atrasada en cola
+        self.other_voice = 0    # utterances descartadas por voz distinta (speaker_id)
 
 
 def transcribe_worker(
@@ -175,6 +181,8 @@ def transcribe_worker(
     orchestrator_ip: str,
     orchestrator_port: int,
     counters: Counters,
+    speaker: SpeakerLock,
+    text_wake: bool,
 ) -> None:
     """Consume utterances cerradas por el VAD y hace el trabajo lento (STT +
     red) fuera del hilo de captura de audio.
@@ -183,7 +191,12 @@ def transcribe_worker(
     loop que lee del stream de PortAudio: mientras esperaban a Whisper/Groq o
     a la conexión TCP, no se drenaban frames del mic y el buffer de captura
     se atrasaba/perdía contenido, sumando desfase a las respuestas del robot.
+
+    Despierto, la huella de voz (speaker_id.py) se calcula en paralelo con
+    Groq: no suma latencia, y si es otra voz se tira la transcripción.
+    `text_wake`: sin spotter, el wake (y la referencia de voz) sale del texto.
     """
+    judge_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="speaker")
     while True:
         item = audio_queue.get()
         if item is None:  # señal de shutdown
@@ -214,10 +227,16 @@ def transcribe_worker(
         if pending:
             warn("STT", f"{pending} utterances esperando en cola (Groq lento?)")
         dbg(f"transcribiendo {seconds:.1f}s de audio...", "STT")
+        # La frase del «oye rai» (wake_prefix) es la referencia misma: no se
+        # compara. Dormido no hay referencia contra la cual comparar.
+        judging = speaker.enabled and wake.is_awake() and not wake_prefix
+        verdict = judge_pool.submit(speaker.judge, audio) if judging else None
         t0 = time.monotonic()
         text, stt_confidence = transcriber.transcribe(audio)
         elapsed = time.monotonic() - t0
         counters.transcribed += 1
+        if verdict is not None:
+            verdict = verdict.result()
         if not text:
             counters.empty += 1
             drop("STT", "Groq no devolvió texto (error arriba, o audio inaudible)",
@@ -234,8 +253,24 @@ def transcribe_worker(
                 dim("WAKE", "la frase era sólo el «oye rai»: pido el «Sí, dime»")
                 wake.announce()
                 continue
+        if (verdict is not None and not verdict.accepted
+                and text_wake and wake.says_name(text)):
+            # Modo texto: otra persona que lo llama por su nombre toma el foco
+            # (en modo audio eso lo decide el spotter, en handle_wake).
+            info("SPK", f"otra voz (sim={verdict.similarity:.2f}) pero me llamó "
+                 "por mi nombre: le paso el foco")
+        elif verdict is not None and not speaker.report(verdict, level):
+            counters.other_voice += 1
+            continue
         # Wake word: hasta que lo llamen por su nombre, no sale nada de acá.
+        wakes_before = wake.wake_count()
         payload = wake.filter(text, level)
+        if wake.wake_count() != wakes_before:
+            # Esta frase lo despertó (modo texto, o «rai» dicho estando
+            # despierto): su voz es la nueva referencia.
+            speaker.lock(audio)
+        elif payload:
+            speaker.follow(audio)
         if payload:
             if send_transcript_to_orchestrator(
                 payload, stt_confidence, orchestrator_ip, orchestrator_port
@@ -389,6 +424,7 @@ def heartbeat_worker(
     wake: WakeWord,
     spotter,
     spatial: Spatial,
+    speaker: SpeakerLock,
     audio_queue: "queue.Queue",
     counters: Counters,
 ) -> None:
@@ -453,6 +489,8 @@ def heartbeat_worker(
             totals += f" descartadas_viejas={counters.dropped_stale}"
         if counters.off_focus:
             totals += f" fuera_de_foco={counters.off_focus}"
+        if counters.other_voice:
+            totals += f" otra_voz={counters.other_voice}"
         if counters.barge_ins:
             totals += f" cortes={counters.barge_ins}"
         parts.append(totals)
@@ -466,6 +504,9 @@ def heartbeat_worker(
                 awake += f" foco={_deg(spatial.focus.focus)}±{DOA_TOLERANCE_DEG:.0f}"
             if wake.min_level() > 0:
                 awake += " " + fmt(nivel_ref=wake.focus_level(), minimo=wake.min_level())
+            if speaker.enabled:
+                ref_s = speaker.ref_seconds()
+                awake += f" voz_ref={ref_s:.1f}s" if ref_s else " voz_ref=ninguna"
             parts.append(awake)
         else:
             parts.append("dormido")
@@ -540,6 +581,11 @@ def main() -> None:
         warn("ARRAY", "audio del ReSpeaker pero sin control USB (pyusb/permisos, ver "
              "README): sin DoA ni parámetros DSP, foco sólo por nivel")
     spatial = Spatial(array)
+    # Huella de voz de quien despertó al robot (speaker_id.py).
+    speaker = SpeakerLock(load_embedder())
+    if speaker.enabled:
+        ok("SPK", "verificación de hablante activa: despierto, sólo escucho la voz "
+           f"que me llamó (sim>={SPEAKER_MIN_SIMILARITY:g})")
 
     wake = WakeWord(level_ratio=(ATTENTION_LEVEL_RATIO_ARRAY if spatial.enabled
                                  else ATTENTION_LEVEL_RATIO))
@@ -594,29 +640,37 @@ def main() -> None:
     audio_queue: "queue.Queue" = queue.Queue()
     worker = threading.Thread(
         target=transcribe_worker,
-        args=(audio_queue, transcriber, wake, ORCHESTRATOR_IP, ORCHESTRATOR_PORT, counters),
+        args=(audio_queue, transcriber, wake, ORCHESTRATOR_IP, ORCHESTRATOR_PORT, counters,
+              speaker, spotter is None),
         daemon=True,
     )
     worker.start()
 
     # Eventos al orquestador: él habla por el parlante de la Jetson («Sí,
     # dime» en cada wake, chime al dormirse). La Pi no emite sonido.
+    def on_asleep() -> None:
+        spatial.on_asleep()
+        speaker.clear()
+
     events = OrchestratorEvents(wake, ORCHESTRATOR_IP, ORCHESTRATOR_PORT,
-                                on_asleep=spatial.on_asleep)
+                                on_asleep=on_asleep)
     if WAKE_WORD_ENABLED:
         events.start()
 
     if HEARTBEAT_S > 0:
         threading.Thread(
             target=heartbeat_worker,
-            args=(vad, mute, wake, spotter, spatial, audio_queue, counters),
+            args=(vad, mute, wake, spotter, spatial, speaker, audio_queue, counters),
             daemon=True,
         ).start()
 
-    def handle_wake(heard: str, now: float, announce: bool = True) -> bool:
+    def handle_wake(heard: str, now: float, announce: bool = True,
+                    voice: "np.ndarray | None" = None) -> bool:
         """El spotter oyó la frase de wake. Despierta (o pasa el foco a quien
         la dijo) y fija la dirección. False si no corresponde atenderla.
-        `announce=False`: el «Sí, dime» lo decide el loop (WAKE_ACK_DECIDE_MS)."""
+        `announce=False`: el «Sí, dime» lo decide el loop (WAKE_ACK_DECIDE_MS).
+        `voice`: audio del «oye rai» para la huella de voz; None = no tocar la
+        referencia (orden de corte: el audio trae la voz del robot)."""
         reading = spatial.reading(now - WAKE_DOA_WINDOW_S, now)
         if spatial.enabled and reading.n >= 2 and reading.blocked >= 0.6:
             drop("WAKE", f"«{heard}» desde un sector de ruido del robot",
@@ -635,6 +689,8 @@ def main() -> None:
                 return False
         old_focus = spatial.focus.focus
         wake.wake_from_audio(announce=announce)
+        if voice is not None:
+            speaker.lock(voice)
         if spatial.enabled:
             new_focus = reading.direction if reading.n >= 2 else None
             spatial.focus.lock(new_focus)
@@ -658,6 +714,9 @@ def main() -> None:
     # orden: al cerrarse va entera a Whisper (y se le saca el nombre).
     ack_pending_t: float | None = None
     wake_utt_open = False
+    # Último ~1.5 s de audio: huella del «oye rai» si el spotter dispara con
+    # la utterance ya cerrada (si está abierta, se usa la utterance).
+    recent_pcm: deque[bytes] = deque(maxlen=int(1500 / FRAME_MS))
 
     try:
         first_frame = True
@@ -716,12 +775,17 @@ def main() -> None:
                                 counters.wakes += 1
                 continue
             was_muted = False
+            recent_pcm.append(frame)
             if spotter is not None:
                 spotter.feed(frame)
                 heard = spotter.take_detection()
                 # Las órdenes de corte sólo valen mientras el robot habla.
                 if heard and not spotter.is_stop(heard):
-                    if handle_wake(heard, af.t, announce=False):
+                    voice = vad.open_audio()
+                    if voice is None:
+                        voice = (np.frombuffer(b"".join(recent_pcm), dtype=np.int16)
+                                 .astype(np.float32) / 32768.0)
+                    if handle_wake(heard, af.t, announce=False, voice=voice):
                         counters.wakes += 1
                         # No se tira la utterance: si la persona sigue de
                         # largo ("oye rai, sentate"), la orden ya empezó acá y

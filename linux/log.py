@@ -85,6 +85,7 @@ _TAG_COLORS = {
     "CTRL": _WHITE,           # SPEAK_START / SPEAK_END del orquestador
     "ARRAY": _BLUE,           # ReSpeaker: parámetros DSP, LEDs, lecturas USB
     "DOA": _BRIGHT_CYAN,      # dirección de la voz y foco espacial
+    "SPK": _MAGENTA,          # verificación de hablante (huella de voz)
     "HB": _DIM,               # heartbeat
     "POWER": _DIM,
     "MAIN": _WHITE,

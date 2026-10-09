@@ -80,6 +80,8 @@ class WakeWord:
         self._level_ratio = level_ratio
         # Wakes que hay que anunciar (cada uno -> evento `awake`).
         self._wake_seq = 0
+        # Todos los wakes, anunciados o no (main.py: ¿esta frase despertó?).
+        self._wakes = 0
 
     # -- estado ---------------------------------------------------------------
 
@@ -127,12 +129,17 @@ class WakeWord:
         with self._lock:
             self._awake_until = time.monotonic() + WAKE_WINDOW_S
             self._focus_level = max(0.0, level)
+            self._wakes += 1
             if announce:
                 self._wake_seq += 1
 
     def wake_seq(self) -> int:
         with self._lock:
             return self._wake_seq
+
+    def wake_count(self) -> int:
+        with self._lock:
+            return self._wakes
 
     def _follow(self, level: float) -> None:
         """La persona se movió un poco: la referencia la sigue (EMA)."""
@@ -211,6 +218,10 @@ class WakeWord:
             if "".join(head[:end]) in self._words:
                 return end - 1
         return None
+
+    def says_name(self, text: str) -> bool:
+        """¿La frase empieza llamándolo («rai, ...»)? Sin tocar el estado."""
+        return WAKE_WORD_ENABLED and self._find(self._tokenize(text)[0]) is not None
 
     def strip_wake(self, text: str) -> str:
         """Saca el «oye rai» del principio de una frase que se sabe que

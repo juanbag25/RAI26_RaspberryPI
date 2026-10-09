@@ -334,6 +334,14 @@ class VoiceActivityDetector:
         """Intervalo de la utterance ABIERTA hasta `now` (None si no hay)."""
         return (self._utt_start_t, now) if self._in_speech else None
 
+    def open_audio(self) -> np.ndarray | None:
+        """Audio de la utterance ABIERTA hasta ahora (None si no hay). Lo usa
+        main.py al oír «oye rai» para fijar la huella de voz (speaker_id.py)."""
+        if not self._in_speech:
+            return None
+        samples = np.frombuffer(b"".join(self._utterance), dtype=np.int16)
+        return samples.astype(np.float32) / 32768.0
+
     def current_level(self) -> float:
         """Nivel (p90) de la utterance ABIERTA hasta ahora (0 si no hay).
 

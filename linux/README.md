@@ -128,6 +128,47 @@ lo fuerza. El log de arranque dice cuál usa: `VAD filtro: voz=silero>=0.5 ...`.
 `SILERO_THRESHOLD` (0.5): bajalo si se come el principio de frases dichas
 bajo, subilo si todavía abre con ruido.
 
+## 4d. Verificación de hablante (huella de voz)
+
+Despierto, el robot sólo transcribe la **misma voz que dijo «oye rai»**
+([`speaker_id.py`](speaker_id.py)). Resuelve lo que el umbral de nivel no
+puede: alguien que habla bajo cerca y alguien que habla fuerte de lejos llegan
+con el mismo RMS, pero no con la misma voz. Corre local (sherpa-onnx +
+TitaNet-small, ~40 MB) en paralelo con Groq, así que no suma latencia.
+
+```bash
+cd ~/RAI26_RaspberryPI
+pip install sherpa-onnx        # ya está en requirements.txt
+curl -L -o models/nemo_en_titanet_small.onnx \
+  https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/nemo_en_titanet_small.onnx
+```
+
+(Sí, el tag del release dice `recongition`.) Si falta el modelo o
+sherpa-onnx, `main.py` avisa y sigue sin verificación.
+
+Cómo decide: la frase del «oye rai» es la referencia; cada frase siguiente se
+compara (similitud coseno) y por debajo de `SPEAKER_MIN_SIMILARITY` (0.35) se
+descarta (`SPK ✗ DESCARTADO otra voz sim=...`). Las frases aceptadas se suman
+a la referencia (hasta 8 s), así que mejora con la charla. Frases de menos de
+0.7 s ("sí", "no") no se comparan. Al dormirse se olvida.
+
+Calibrar en el lugar real:
+
+```bash
+python speaker_id.py
+```
+
+La primera frase es la referencia (decí «oye rai»). Después hablá vos varias
+veces, también bajito y de más lejos, y que hable otra persona. Imprime la
+similitud de cada frase. `SPEAKER_MIN_SIMILARITY` va entre tu mínimo y el
+máximo de la otra persona. En LibriSpeech (audio limpio, 10 personas) con
+0.35 se aceptaron 44 de 45 frases propias y 2 de 45 ajenas. Con el mic real y
+ruido del robot, a medir.
+
+Con esto activo se puede **bajar el umbral de nivel** (`NEAR_RMS_THRESHOLD`)
+para que no te corte cuando hablás bajo: las voces de fondo que pasen el nivel
+las frena la huella.
+
 ## 5. Configure the `.env`
 
 Create `linux/.env` (it's already gitignored; see `linux/.env.example`):
