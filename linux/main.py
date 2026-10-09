@@ -859,15 +859,15 @@ def main() -> None:
                     spotter.feed(frame)
                     heard = spotter.take_detection()
                     if heard:
-                        loud, peak, speaker = barge.loud_enough()
+                        loud, peak, robot_level = barge.loud_enough()
                         if spatial.from_speaker(af.t - WAKE_DOA_WINDOW_S, af.t):
                             drop("CTRL", f"«{heard}» vino del parlante del robot")
                         elif not loud:
                             drop("CTRL", f"«{heard}» no se destaca sobre la voz del robot",
-                                 pico=peak, parlante=speaker, factor=SPEAK_BARGE_RATIO)
+                                 pico=peak, parlante=robot_level, factor=SPEAK_BARGE_RATIO)
                         else:
                             counters.barge_ins += 1
-                            ok("CTRL", f"ORDEN DE CORTE «{heard}» " + fmt(pico=peak, parlante=speaker))
+                            ok("CTRL", f"ORDEN DE CORTE «{heard}» " + fmt(pico=peak, parlante=robot_level))
                             events.send("stop")
                             # «oye rai» en vez de «para rai»: además re-despierta
                             # (el orquestador contesta «Sí, dime»).
