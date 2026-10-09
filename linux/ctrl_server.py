@@ -4,7 +4,7 @@ El orquestador manda, con el mismo protocolo TCP length-prefixed del resto
 del sistema ([uint32 big-endian][payload UTF-8]), dos mensajes:
 
     SPEAK_START  -> el robot empieza a hablar: silenciar el mic
-    SPEAK_END    -> terminó: volver a escuchar
+    SPEAK_END    -> terminó: volver a escuchar (SPEAK_END_TAIL_S después)
 
 `SpeakMute.is_muted()` se consulta desde el loop de captura de main.py. Si un
 SPEAK_END se pierde (red, crash del orquestador), el mute expira solo a los
@@ -19,7 +19,7 @@ import threading
 import time
 from typing import Callable
 
-from config import MUTE_TIMEOUT_S
+from config import MUTE_TIMEOUT_S, SPEAK_END_TAIL_S
 from log import err, info, warn
 
 _MAX_MESSAGE_BYTES = 1024
@@ -38,13 +38,19 @@ class SpeakMute:
         self._on_speak_end = on_speak_end
         self._muted = threading.Event()
         self._deadline = 0.0
+        # True entre el SPEAK_END y el fin de la cola (SPEAK_END_TAIL_S): el
+        # vencimiento del deadline es normal, no un SPEAK_END perdido.
+        self._ending = False
 
     def is_muted(self) -> bool:
         if not self._muted.is_set():
             return False
         if time.monotonic() > self._deadline:
             self._muted.clear()
-            warn("CTRL", "SPEAK_END perdido: desmuteo por timeout")
+            if self._ending:
+                info("CTRL", "robot terminó: mic activo")
+            else:
+                warn("CTRL", "SPEAK_END perdido: desmuteo por timeout")
             self._notify_speak_end()
             return False
         return True
@@ -63,14 +69,20 @@ class SpeakMute:
 
     def handle(self, message: str) -> None:
         if message == "SPEAK_START":
+            self._ending = False
             self._deadline = time.monotonic() + self._timeout
             self._muted.set()
             info("CTRL", "robot habla: mic MUTEADO")
             self._notify(self._on_speak_start, "on_speak_start")
         elif message == "SPEAK_END":
-            self._muted.clear()
-            info("CTRL", "robot terminó: mic activo")
-            self._notify_speak_end()
+            if SPEAK_END_TAIL_S <= 0 or not self._muted.is_set():
+                self._muted.clear()
+                info("CTRL", "robot terminó: mic activo")
+                self._notify_speak_end()
+                return
+            # Sigue muteado un rato: is_muted() desmutea (y avisa) al vencer.
+            self._ending = True
+            self._deadline = time.monotonic() + SPEAK_END_TAIL_S
         else:
             warn("CTRL", f"mensaje desconocido: {message!r}")
 

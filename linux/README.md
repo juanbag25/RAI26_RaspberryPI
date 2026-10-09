@@ -214,6 +214,44 @@ intercaladas): 9 voces aprendidas, ninguna mezcla dos personas, y desde la
 segunda sesión de cada uno el «oye rai» se reconoce en 49 de 51 wakes. Con el
 mic real, en español y con ruido, a medir.
 
+### Frases mezcladas: dos personas a la vez (experimental)
+
+El VAD no separa voces. Si alguien se mete mientras le hablan al robot, todo
+cae en la misma frase, y la dirección y la huella de voz la juzgan **entera**.
+Las lecturas de DoA se reparten y la huella sale intermedia, así que se tira
+todo aunque una parte la haya dicho quien llamó.
+
+Con `MIX_TRIM_ENABLED=1` ([`mix_trim.py`](mix_trim.py)), una frase rechazada
+por dirección (`fuera de foco`) o por voz (`otra voz`) se juzga en tramos de
+0.5 s. Por cada tramo se mira la dirección y la huella en ventanas de 1 s
+contra quien llamó. Se conservan los tramos que no son claramente de otro, se
+verifica de nuevo lo que quedó, y sólo eso va a Whisper. Si toda la frase era
+de otro, sale el descarte de siempre en una línea. El bloque `MIX` aparece
+sólo cuando hubo mezcla:
+
+```
+MIX   ✂ frase mezclada (otra voz sim=0.22): conservo 2.0 de 3.5 s  [cómputo 0.31 s]
+        voz  ███▒▒·██   █ quien llamó  ▒ otra  ? sin dato  · pausa  (0.5 s/casilla)
+        dir  ███▒▒·██   █ en foco 32°  ▒ fuera
+        uso  ███───██
+        saqué 1.5–2.5 s: otra voz (sim 0.05–0.20) y otra dirección (205°)
+        lo que quedó vs quien llamó: sim 0.48 (mínimo 0.35)
+        la frase entera decía: «prendé la luz che viste el partido»
+STT   · «prendé la luz» (0.61s, confianza=0.92)  [recortada 2.0/3.5 s]
+```
+
+Si hubo mezcla pero no alcanza (quedó menos de `MIX_TRIM_MIN_KEEP_S`, o lo
+conservado tampoco se parece), sale el mismo bloque como `MIX ✗ DESCARTADO`.
+Lo recortado no se suma a la referencia de voz. Lo que las dos personas dicen
+exactamente a la vez no se separa: se rescatan los pedazos donde habla una
+sola.
+
+Ajustes: `MIX_TRIM_MIN_SIM` (0.30, similitud por ventana de 1 s; mirá en el
+bloque las `sim` de tus tramos y las de la otra persona),
+`MIX_TRIM_MIN_KEEP_S` (0.8), `MIX_TRIM_SEG_S`, `MIX_TRIM_WIN_S`,
+`MIX_TRIM_PAD_S`. `python log_report.py` resume cuántas se recortaron y
+cuánto tarda el cómputo en la Pi (sólo corre en frases ya rechazadas).
+
 ## 5. Configure the `.env`
 
 Create `linux/.env` (it's already gitignored; see `linux/.env.example`):
@@ -227,6 +265,13 @@ EOF
 ```
 
 `GROQ_API_KEY` is only required when `BACKEND = "groq"`.
+
+`ORCHESTRATOR_IP` acepta varias IPs separadas por coma (ej. LAN y Tailscale:
+`ORCHESTRATOR_IP=192.168.1.90,100.115.140.11`). Se usa la última que anduvo;
+si no contesta se prueban las otras (timeout 1.5 s por IP). Si no contesta
+ninguna, por `ORCHESTRATOR_RETRY_S` (5 s) los envíos fallan al instante en
+vez de frenar la cola, y una frase que no llegó no estira la ventana de
+despierto.
 
 ## 6. Find the microphone
 
@@ -268,7 +313,10 @@ mic → STT → (TCP 9000) orquestador → LLM → TTS → parlante del orquesta
 Mientras el robot habla, el orquestador manda `SPEAK_START`/`SPEAK_END` al
 puerto `CTRL_PORT` (default 9001, en `config.py`) y `main.py` descarta el
 audio del mic para no transcribir la propia voz del robot. Si el `SPEAK_END`
-se pierde, el mute expira solo a los `MUTE_TIMEOUT_S` segundos.
+se pierde, el mute expira solo a los `MUTE_TIMEOUT_S` segundos. Después del
+`SPEAK_END` el mic sigue muteado `SPEAK_END_TAIL_S` (0.3 s): el aviso llega
+antes de que termine de sonar el parlante y sin ese margen se transcribía la
+cola del «Sí, dime».
 
 Mapa completo de IPs/puertos del sistema: ver `docs/NETWORKING.md` en el repo
 principal (R-AI-026).

@@ -16,6 +16,8 @@ Qué muestra:
 - STT: destino de cada frase, latencia y confianza de Groq.
 - Voz (speaker_id): similitudes aceptadas / rechazadas, rechazos cerca del
   umbral, reconocimientos al despertar, decisiones de la memoria de voces.
+- Frases mezcladas (mix_trim.py, MIX_TRIM_ENABLED): cuántas se recortaron,
+  por qué no las otras, y cuánto tardó el cómputo en la Pi.
 - Pistas: reglas simples sobre los números de arriba. Son sugerencias para
   mirar, no ajustes automáticos.
 """
@@ -168,6 +170,24 @@ def main() -> None:
     print(f"  wakes: {sum(1 for w in wakes if w.get('accepted'))} aceptados, "
           f"{sum(1 for w in wakes if not w.get('accepted'))} rechazados")
     print()
+
+    # --- frases mezcladas (mix_trim.py) ------------------------------------------
+    mixes = [s for s in stt if s.get("mix")]
+    if mixes:
+        tried = [s for s in mixes if s["mix"].get("result") not in (
+            "sin datos por tramo", "ningún tramo es claramente de otro",
+            "ningún tramo es de quien llamó")]
+        cut_ok = [s for s in tried if s["mix"].get("result") == "recortada"]
+        print(f"== Frases mezcladas (MIX_TRIM, {len(mixes)} juzgadas por tramos)")
+        print(f"  con mezcla: {len(tried)}; recortadas y enviadas: {len(cut_ok)}")
+        print("  por qué no: " + (", ".join(f"{k}={n}" for k, n in Counter(
+            s["mix"].get("result") for s in mixes if s["mix"].get("result") != "recortada"
+        ).most_common()) or "-"))
+        print(f"  cómputo: {pct([s['mix'].get('compute_s') for s in mixes], 50, 90)} s")
+        for s in cut_ok[-5:]:
+            m = s["mix"]
+            print(f"    {m.get('uso')}  {m.get('kept_s')}/{m.get('total_s')} s  «{s.get('text', '')}»")
+        print()
 
     # --- pistas ----------------------------------------------------------------
     hints = []

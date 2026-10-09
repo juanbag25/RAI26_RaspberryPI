@@ -132,6 +132,10 @@ STT_HALLUCINATIONS = _env_list("STT_HALLUCINATIONS", (
 CTRL_PORT = 9001
 # Auto-desmute si se pierde el SPEAK_END (segundos).
 MUTE_TIMEOUT_S = 30.0
+# El mic sigue muteado este tiempo después del SPEAK_END: el SPEAK_END llega
+# antes de que termine de sonar el parlante de la Jetson (y queda la cola de
+# reverberación). Sin esto se transcribía el final del «Sí, dime» como «Sí.».
+SPEAK_END_TAIL_S = 0.3
 
 # Qué decide "¿esto es voz humana?" (el filtro de cercanía por nivel va
 # encima en los dos casos):
@@ -400,6 +404,24 @@ SPEAKER_MIN_REF_S = _env_float("SPEAKER_MIN_REF_S", 0.8)
 SPEAKER_MIN_AUDIO_S = _env_float("SPEAKER_MIN_AUDIO_S", 0.7)
 # Tope de audio de la referencia (el «oye rai» + las últimas frases aceptadas).
 SPEAKER_REF_MAX_S = _env_float("SPEAKER_REF_MAX_S", 8.0)
+
+# --- Recorte de frases mezcladas (mix_trim.py) -------------------------------------
+# Si dos personas se pisan, la frase entera puede no pasar la dirección (DoA) o
+# la huella de voz aunque una parte sea de quien llamó. Con esto, en vez de
+# tirarla, se juzga por tramos y se transcribe sólo lo de quien llamó.
+# Experimental: apagado por defecto.
+MIX_TRIM_ENABLED = _env_bool("MIX_TRIM_ENABLED", False)
+# Largo de cada tramo (s): la dirección y el resultado se deciden con esta resolución.
+MIX_TRIM_SEG_S = _env_float("MIX_TRIM_SEG_S", 0.5)
+# Ventana de la huella de voz por tramo (s). Menos de ~1 s da huellas ruidosas.
+MIX_TRIM_WIN_S = _env_float("MIX_TRIM_WIN_S", 1.0)
+# Similitud mínima de una ventana para contar como quien llamó. Con 1 s de
+# audio la similitud da más baja que con la frase entera: calibrar con el log.
+MIX_TRIM_MIN_SIM = _env_float("MIX_TRIM_MIN_SIM", 0.30)
+# Con menos audio conservado que esto se descarta igual (s).
+MIX_TRIM_MIN_KEEP_S = _env_float("MIX_TRIM_MIN_KEEP_S", 0.8)
+# Margen que se suma a cada lado de lo conservado (s), para no cortar palabras.
+MIX_TRIM_PAD_S = _env_float("MIX_TRIM_PAD_S", 0.15)
 
 # --- Memoria de voces (speaker_memory.py) ---------------------------------------
 # Sin enrolamiento: cada conversación (de «oye rai» a dormirse) es de una sola

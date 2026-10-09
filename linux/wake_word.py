@@ -113,6 +113,18 @@ class WakeWord:
             if now < self._awake_until:
                 self._awake_until = max(self._awake_until, now + REPLY_WAIT_S)
 
+    def window_deadline(self) -> float:
+        """Hasta cuándo dura la ventana ahora (para restore_window)."""
+        with self._lock:
+            return self._awake_until
+
+    def restore_window(self, deadline: float) -> None:
+        """Deshace una renovación: la frase no llegó al orquestador, así que
+        no cuenta como charla. Sólo acorta; main.py no lo llama si en el
+        medio hubo un wake nuevo."""
+        with self._lock:
+            self._awake_until = min(self._awake_until, deadline)
+
     def announce(self) -> None:
         """Pedir el «Sí, dime» de un wake ya abierto (ver wake_from_audio)."""
         with self._lock:

@@ -9,7 +9,8 @@ Formato de cada línea:
 - ETAPA es quién habla (AUDIO, VAD, SPOT, WAKE, STT, NET, CTRL, HB...) y tiene
   siempre el mismo color, así se sigue el recorrido de una frase de un vistazo.
 - El símbolo dice qué pasó: ✓ aceptado/hecho, ✗ DESCARTADO (con la razón y sólo
-  los valores que la explican), ! aviso, ✖ error, · info sin importancia.
+  los valores que la explican), ✂ se conservó sólo una parte, ! aviso,
+  ✖ error, · info sin importancia.
 - Todo sale con flush: si stdout no es una terminal (systemd, nohup,
   `> log.txt`) Python bufferea y parece que "no pasa nada" durante minutos.
 
@@ -105,6 +106,7 @@ _TAG_COLORS = {
     "ARRAY": _BLUE,           # ReSpeaker: parámetros DSP, LEDs, lecturas USB
     "DOA": _BRIGHT_CYAN,      # dirección de la voz y foco espacial
     "SPK": _MAGENTA,          # verificación de hablante (huella de voz)
+    "MIX": _BRIGHT_CYAN,      # recorte de frases con dos voces (mix_trim.py)
     "LOG": _DIM,
     "HB": _DIM,               # heartbeat
     "POWER": _DIM,
@@ -234,11 +236,14 @@ def event(name: str, **fields: object) -> None:
 
 def _emit(tag: str, symbol: str, message: str, *, symbol_color: str = "",
           message_color: str = "", err: bool = False, kind: str = "",
-          plain: str | None = None, fields: dict | None = None) -> None:
+          plain: str | None = None, fields: dict | None = None,
+          lines: list[str] | None = None) -> None:
     if _sink is not None:
         record = {"k": kind, "tag": tag, "msg": message if plain is None else plain}
         if fields:
             record["f"] = fields
+        if lines:
+            record["lines"] = lines
         _sink.write(record)
     stream = sys.stderr if err else sys.stdout
     tag_color = _TAG_COLORS.get(tag, "")
@@ -250,6 +255,11 @@ def _emit(tag: str, symbol: str, message: str, *, symbol_color: str = "",
         + (_paint(symbol, symbol_color) + " " if symbol else "")
         + _paint(message, message_color)
     )
+    if lines:
+        # Debajo del mensaje, alineadas con él. Un solo print: otro hilo no
+        # puede meter una línea suya en el medio del bloque.
+        indent = " " * (len(_stamp()) + 1 + _TAG_WIDTH + 1 + 2)
+        line += "".join("\n" + indent + _paint(extra, _DIM) for extra in lines)
     print(line, file=stream, flush=True)
 
 
@@ -279,6 +289,22 @@ def drop(tag: str, reason: str, **values: object) -> None:
         message += "  " + _paint(detail, _DIM)
     _emit(tag, "✗", message, symbol_color=_BRIGHT_YELLOW, kind="drop",
           plain=f"DESCARTADO {reason}", fields=values or None)
+
+
+def drop_block(tag: str, reason: str, lines: list[str], **values: object) -> None:
+    """drop() con un bloque de detalle debajo (ej. el mapa de tramos de
+    mix_trim.py), impreso de una sola vez."""
+    detail = fmt(**values)
+    message = _paint("DESCARTADO ", _BRIGHT_YELLOW, _BOLD) + _paint(reason, _BRIGHT_YELLOW)
+    if detail:
+        message += "  " + _paint(detail, _DIM)
+    _emit(tag, "✗", message, symbol_color=_BRIGHT_YELLOW, kind="drop",
+          plain=f"DESCARTADO {reason}", fields=values or None, lines=lines)
+
+
+def cut(tag: str, message: str, lines: list[str]) -> None:
+    """Se conservó sólo una parte de la frase (✂), con el detalle debajo."""
+    _emit(tag, "✂", message, symbol_color=_BRIGHT_CYAN, kind="cut", lines=lines)
 
 
 def warn(tag: str, message: str) -> None:

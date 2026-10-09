@@ -38,6 +38,7 @@ from config import (
     DOA_TOLERANCE_DEG,
     FRAME_MS,
     MIC_MODE,
+    MIX_TRIM_ENABLED,
     ORCH_EVENT_PREFIX,
     RESPEAKER_ENABLED,
     RESPEAKER_LED_BRIGHTNESS,
@@ -58,6 +59,7 @@ from config import (
 from ctrl_server import SpeakMute, start_in_background
 from doa import DoaFocus, DoaReading, in_any_sector, parse_sectors, to_robot_frame
 from log import DEBUG, dbg, dim, drop, err, event, fmt, info, ok, persist, warn
+from mix_trim import MixContext, MixTrimmer, doa_by_segment
 from respeaker import ReSpeaker
 from speaker_id import SpeakerLock, load_embedder, load_memory
 from vad import VoiceActivityDetector
@@ -76,7 +78,13 @@ Target_IP = "192.168.68.60"
 # retry de TCP del SO (puede tardar minutos) si el host no responde ni
 # rechaza ni acepta (IP vieja, firewall, WSL que cambio de IP al reiniciar
 # el orquestador). Eso colgaba el hilo que lo llama indefinidamente.
-ORCHESTRATOR_CONNECT_TIMEOUT_S = 3.0
+# Es por IP: con varias (LAN + Tailscale) el peor caso es la suma.
+ORCHESTRATOR_CONNECT_TIMEOUT_S = 1.5
+
+# Si ninguna IP del orquestador contesta, durante este tiempo los envíos
+# fallan al instante en vez de esperar el timeout de nuevo: si no, cada frase
+# frena la cola de STT y las siguientes llegan viejas.
+ORCHESTRATOR_RETRY_S = float(os.getenv("ORCHESTRATOR_RETRY_S", "5") or 5)
 
 # Cada cuánto imprimir el resumen de "qué está viendo el mic" (0 = nunca).
 # Es la línea a mirar cuando "se queda escuchando y no pasa nada".
@@ -146,15 +154,52 @@ def send_to_orchestrator(text: str, ip: str, port: int, *, quiet: bool = False) 
 # -----------------------------
 
 
-def send_transcript_to_orchestrator(
-    text: str, stt_confidence: float, ip: str, port: int, *, quiet: bool = False
-) -> bool:
-    """Envuelve una transcripción (texto + confianza del STT) en JSON y la
-    manda por el mismo canal que `send_to_orchestrator`. Los eventos de wake
-    (`ORCH_EVENT_PREFIX`) NO pasan por acá: siguen yendo como string plano,
-    que es como el orquestador los distingue de una transcripción."""
-    payload = json.dumps({"text": text, "stt_confidence": stt_confidence})
-    return send_to_orchestrator(payload, ip, port, quiet=quiet)
+class OrchestratorLink:
+    """A dónde mandar: una o varias IPs del orquestador (`ORCHESTRATOR_IP`
+    separadas por coma, ej. LAN y Tailscale). Se usa la última que anduvo; si
+    falla se prueban las otras y la que conteste queda como actual, así no hay
+    que editar el .env cuando el orquestador cambia de red.
+
+    Si no contesta ninguna, durante ORCHESTRATOR_RETRY_S los envíos fallan sin
+    intentar (ver ORCHESTRATOR_RETRY_S).
+    """
+
+    def __init__(self, hosts: list[str], port: int) -> None:
+        self.hosts = hosts
+        self.port = port
+        self._lock = threading.Lock()
+        self._current = hosts[0]
+        self._down_until = 0.0
+
+    def describe(self) -> str:
+        return ", ".join(f"{h}:{self.port}" for h in self.hosts)
+
+    def send(self, text: str, *, quiet: bool = False) -> bool:
+        with self._lock:
+            if time.monotonic() < self._down_until:
+                dbg("orquestador caído hace poco: no reintento todavía", "NET")
+                return False
+            current = self._current
+        for ip in [current] + [h for h in self.hosts if h != current]:
+            if send_to_orchestrator(text, ip, self.port, quiet=quiet):
+                with self._lock:
+                    self._down_until = 0.0
+                    if self._current != ip:
+                        self._current = ip
+                        ok("NET", f"orquestador ahora en {ip}:{self.port}")
+                return True
+        with self._lock:
+            self._down_until = time.monotonic() + ORCHESTRATOR_RETRY_S
+        warn("NET", f"orquestador inalcanzable ({self.describe()}): no reintento "
+             f"por {ORCHESTRATOR_RETRY_S:g}s")
+        return False
+
+    def send_transcript(self, text: str, stt_confidence: float) -> bool:
+        """Envuelve una transcripción (texto + confianza del STT) en JSON. Los
+        eventos de wake (`ORCH_EVENT_PREFIX`) NO pasan por acá: siguen yendo
+        como string plano, que es como el orquestador los distingue de una
+        transcripción."""
+        return self.send(json.dumps({"text": text, "stt_confidence": stt_confidence}))
 
 
 def config_snapshot() -> dict:
@@ -206,14 +251,14 @@ class Counters:
         self.barge_ins = 0      # órdenes de corte enviadas mientras el robot hablaba
         self.dropped_stale = 0  # utterances descartadas por vieja/atrasada en cola
         self.other_voice = 0    # utterances descartadas por voz distinta (speaker_id)
+        self.mix_trimmed = 0    # frases mezcladas de las que se mandó sólo una parte
 
 
 def transcribe_worker(
     audio_queue: "queue.Queue",
     transcriber,
     wake: WakeWord,
-    orchestrator_ip: str,
-    orchestrator_port: int,
+    orchestrator: OrchestratorLink,
     counters: Counters,
     speaker: SpeakerLock,
     text_wake: bool,
@@ -229,15 +274,21 @@ def transcribe_worker(
     Despierto, la huella de voz (speaker_id.py) se calcula en paralelo con
     Groq: no suma latencia, y si es otra voz se tira la transcripción.
     `text_wake`: sin spotter, el wake (y la referencia de voz) sale del texto.
+
+    MIX_TRIM_ENABLED: una frase rechazada entera por dirección o por voz se
+    juzga por tramos (mix_trim.py) y, si se puede, se transcribe sólo la
+    parte de quien llamó.
     """
     judge_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="speaker")
+    mixer = MixTrimmer(speaker)
 
     def process(item, rec: dict) -> str:
         """Una utterance: STT + voz + wake + envío. Devuelve su destino
         (outcome del evento "stt" del log persistente) y va llenando `rec`."""
         # wake_prefix: la frase empieza con el «oye rai» que oyó el spotter
         # (la persona siguió hablando sin esperar el «Sí, dime»).
-        audio, level, queued_at, wake_prefix = item
+        # mix: contexto para recortar frases mezcladas (MIX_TRIM_ENABLED).
+        audio, level, queued_at, wake_prefix, mix = item
         age = time.monotonic() - queued_at
         seconds = len(audio) / 16000.0
         rec.update(audio_s=round(seconds, 2), level=round(level, 5), age_s=round(age, 2),
@@ -246,13 +297,29 @@ def transcribe_worker(
             counters.dropped_stale += 1
             drop("STT", "vieja en cola", edad_s=f"{age:.1f}", nivel=level)
             return "vieja"
+        # Recorte: lo que se manda es sólo una parte de la frase. Ya se
+        # verificó contra quien llamó dentro de mixer.trim(), y no se suma a
+        # la referencia de voz (los bordes pueden traer algo de la otra).
+        trimmed = None
+        if mix is not None and mix.doa_rejected:
+            # La dirección la rechazó entera (hilo de captura): ¿hay un pedazo
+            # que sí venga de quien llamó?
+            trimmed = mixer.trim(audio, mix.doa_rejected, mix)
+            rec.update(mix=trimmed.summary, doa=mix.doa_values)
+            if trimmed.audio is None:
+                counters.off_focus += 1
+                if not trimmed.mixed:
+                    drop("DOA", "fuera de foco", **mix.doa_values)
+                return "fuera_de_foco"
+            counters.mix_trimmed += 1
+            audio = trimmed.audio
         pending = audio_queue.qsize()
         if pending:
             warn("STT", f"{pending} utterances esperando en cola (Groq lento?)")
         dbg(f"transcribiendo {seconds:.1f}s de audio...", "STT")
         # La frase del «oye rai» (wake_prefix) es la referencia misma: no se
         # compara. Dormido no hay referencia contra la cual comparar.
-        judging = speaker.enabled and wake.is_awake() and not wake_prefix
+        judging = speaker.enabled and wake.is_awake() and not wake_prefix and trimmed is None
         verdict = judge_pool.submit(speaker.judge, audio) if judging else None
         t0 = time.monotonic()
         text, stt_confidence = transcriber.transcribe(audio)
@@ -264,12 +331,35 @@ def transcribe_worker(
             rec.update(spk_sim=verdict.similarity, spk_ok=verdict.accepted,
                        spk_why=verdict.why, spk_ref_s=round(speaker.ref_seconds(), 1),
                        voice=speaker.voice_label())
+        if (text and MIX_TRIM_ENABLED and verdict is not None and not verdict.accepted
+                and not (text_wake and wake.says_name(text))):
+            # Otra voz en la frase entera: ¿hay un pedazo de quien llamó? La
+            # transcripción entera no se loguea suelta: va dentro del bloque
+            # MIX, y la línea STT de abajo es la del recorte.
+            trimmed = mixer.trim(audio, f"otra voz sim={verdict.similarity:.2f}", mix,
+                                 full_text=text)
+            rec["mix"] = trimmed.summary
+            if trimmed.audio is None:
+                counters.other_voice += 1
+                if not trimmed.mixed:
+                    speaker.report(verdict, level)
+                return "otra_voz"
+            counters.mix_trimmed += 1
+            audio = trimmed.audio
+            verdict = None
+            t0 = time.monotonic()
+            text, stt_confidence = transcriber.transcribe(audio)
+            elapsed = time.monotonic() - t0
+            counters.transcribed += 1
+            rec.update(text=text, stt_s=round(elapsed, 3), conf=stt_confidence)
         if not text:
             counters.empty += 1
             drop("STT", "Groq no devolvió texto (error arriba, o audio inaudible)",
-                 audio_s=f"{seconds:.1f}", nivel=level)
+                 audio_s=f"{len(audio) / 16000.0:.1f}", nivel=level)
             return "vacia"
-        info("STT", f"«{text}» ({elapsed:.2f}s, confianza={stt_confidence:.2f})")
+        tag = (f"  [recortada {trimmed.kept_s:.1f}/{trimmed.total_s:.1f} s]"
+               if trimmed is not None else "")
+        info("STT", f"«{text}» ({elapsed:.2f}s, confianza={stt_confidence:.2f}){tag}")
         if is_prompt_echo(text):
             drop("STT", "eco del prompt de Whisper: es ruido, no habló nadie")
             return "eco_prompt"
@@ -291,13 +381,14 @@ def transcribe_worker(
             return "otra_voz"
         # Wake word: hasta que lo llamen por su nombre, no sale nada de acá.
         wakes_before = wake.wake_count()
+        window_before = wake.window_deadline()
         payload = wake.filter(text, level)
         if wake.wake_count() != wakes_before:
             # Esta frase lo despertó (modo texto, o «rai» dicho estando
             # despierto): su voz es la nueva referencia.
             speaker.lock(audio)
             rec["woke"] = True
-        elif payload:
+        elif payload and trimmed is None:
             # Para la memoria de voces sólo cuenta lo bien verificado: la
             # frase del wake o una aceptada con similitud alta.
             speaker.follow(audio, verdict.similarity if verdict is not None else None,
@@ -305,14 +396,16 @@ def transcribe_worker(
         if not payload:
             return "filtrada_wake"
         rec["sent_text"] = payload
-        if send_transcript_to_orchestrator(
-            payload, stt_confidence, orchestrator_ip, orchestrator_port
-        ):
+        if orchestrator.send_transcript(payload, stt_confidence):
             counters.sent += 1
             # No dormirse mientras el robot piensa la respuesta.
             wake.await_reply()
             return "enviada"
         counters.send_failed += 1
+        if wake.wake_count() == wakes_before:
+            # No llegó al robot: no cuenta como charla, la ventana no se
+            # estira (si no, queda «despierto» hablando con nadie).
+            wake.restore_window(window_before)
         return "envio_fallido"
 
     while True:
@@ -327,9 +420,17 @@ def transcribe_worker(
                 newer = audio_queue.get_nowait()
             except queue.Empty:
                 break
-            counters.dropped_stale += 1
             if newer is None:  # señal de shutdown
                 return
+            if _doa_rejected(newer) and not _doa_rejected(item):
+                # Una que la dirección rechazó (en cola sólo para intentar el
+                # recorte) no le gana el lugar a una que sí pasó.
+                counters.off_focus += 1
+                drop("DOA", "fuera de foco", **newer[4].doa_values)
+                event("stt", outcome="fuera_de_foco", audio_s=round(len(newer[0]) / 16000.0, 2),
+                      level=round(newer[1], 5), doa=newer[4].doa_values)
+                continue
+            counters.dropped_stale += 1
             drop("STT", "superada por una más nueva en cola")
             event("stt", outcome="superada", audio_s=round(len(item[0]) / 16000.0, 2),
                   level=round(item[1], 5))
@@ -349,6 +450,12 @@ def transcribe_worker(
 WAKE_EVENT_POLL_S = 0.1
 
 
+def _doa_rejected(item) -> bool:
+    """¿La dirección rechazó esta frase entera? (en cola sólo para el recorte)"""
+    mix = item[4]
+    return mix is not None and bool(mix.doa_rejected)
+
+
 class OrchestratorEvents:
     """Eventos para el orquestador (`@@event:<nombre>`, mismo socket que el
     texto). La Pi no tiene parlante: así se entera el orquestador de que tiene
@@ -358,14 +465,13 @@ class OrchestratorEvents:
     `awake` sale por CADA wake (`WakeWord.wake_seq`), también estando ya
     despierto: otra persona dijo «oye rai» y toma el foco. `asleep` sale al
     vencerse la ventana: no es un evento, es tiempo que pasa, por eso se mira
-    por polling. Los envíos bloquean hasta 3 s si el orquestador no responde:
-    corren en su propio hilo, en orden.
+    por polling. Los envíos bloquean hasta el timeout si el orquestador no
+    responde: corren en su propio hilo, en orden.
     """
 
-    def __init__(self, wake: WakeWord, ip: str, port: int, on_asleep=None) -> None:
+    def __init__(self, wake: WakeWord, orchestrator: OrchestratorLink, on_asleep=None) -> None:
         self._wake = wake
-        self._ip = ip
-        self._port = port
+        self._orchestrator = orchestrator
         self._on_asleep = on_asleep
         self._queue: "queue.Queue[str]" = queue.Queue()
 
@@ -399,7 +505,7 @@ class OrchestratorEvents:
                 self._post(name)
 
     def _post(self, name: str) -> None:
-        send_to_orchestrator(ORCH_EVENT_PREFIX + name, self._ip, self._port, quiet=True)
+        self._orchestrator.send(ORCH_EVENT_PREFIX + name, quiet=True)
 
 
 class Spatial:
@@ -553,6 +659,8 @@ def heartbeat_worker(
             totals += f" fuera_de_foco={counters.off_focus}"
         if counters.other_voice:
             totals += f" otra_voz={counters.other_voice}"
+        if counters.mix_trimmed:
+            totals += f" recortadas={counters.mix_trimmed}"
         if counters.barge_ins:
             totals += f" cortes={counters.barge_ins}"
         parts.append(totals)
@@ -614,9 +722,13 @@ def heartbeat_worker(
 
 def main() -> None:
     # --- CONFIGURACIÓN DE RED ---
-    # Lee la IP desde tu archivo .env, o usa una IP fija de respaldo
+    # Lee la(s) IP(s) desde tu archivo .env, o usa una IP fija de respaldo.
+    # Varias separadas por coma (ej. LAN,Tailscale): se usa la que conteste.
     ORCHESTRATOR_IP = os.getenv("ORCHESTRATOR_IP", Target_IP)  # <-- ¡Cambia esto por la IP de tu PC!
     ORCHESTRATOR_PORT = 9000
+    orchestrator = OrchestratorLink(
+        [h.strip() for h in ORCHESTRATOR_IP.split(",") if h.strip()] or [Target_IP],
+        ORCHESTRATOR_PORT)
 
     log_dir = persist()
     info("MAIN", "=== STT Pi arrancando ===")
@@ -725,7 +837,7 @@ def main() -> None:
     audio_queue: "queue.Queue" = queue.Queue()
     worker = threading.Thread(
         target=transcribe_worker,
-        args=(audio_queue, transcriber, wake, ORCHESTRATOR_IP, ORCHESTRATOR_PORT, counters,
+        args=(audio_queue, transcriber, wake, orchestrator, counters,
               speaker, spotter is None),
         daemon=True,
     )
@@ -737,13 +849,12 @@ def main() -> None:
         spatial.on_asleep()
         speaker.clear()
 
-    events = OrchestratorEvents(wake, ORCHESTRATOR_IP, ORCHESTRATOR_PORT,
-                                on_asleep=on_asleep)
+    events = OrchestratorEvents(wake, orchestrator, on_asleep=on_asleep)
     if WAKE_WORD_ENABLED:
         events.start()
 
     event("config", **config_snapshot(), git=_git_version(), host=socket.gethostname(),
-          orchestrator=f"{ORCHESTRATOR_IP}:{ORCHESTRATOR_PORT}", vad_engine=vad.engine,
+          orchestrator=orchestrator.describe(), vad_engine=vad.engine,
           spotter=spotter is not None, speaker=speaker.enabled,
           voices=[v.label for v in speaker.known_voices()], heartbeat_s=HEARTBEAT_S,
           max_queue_age_s=MAX_QUEUE_AGE_S)
@@ -806,7 +917,7 @@ def main() -> None:
 
     barge = BargeIn()
 
-    info("NET", f"orquestador en {ORCHESTRATOR_IP}:{ORCHESTRATOR_PORT}")
+    info("NET", f"orquestador en {orchestrator.describe()}")
 
     # «Oye rai» y después ¿siguió hablando? (ver WAKE_ACK_DECIDE_MS)
     # ack_pending_t: cuándo disparó el spotter, mientras se decide.
@@ -939,12 +1050,28 @@ def main() -> None:
                     event("stt", outcome="dormido", level=round(level, 5),
                           audio_s=round(len(audio) / 16000.0, 2))
                     continue
+                # Recorte de frases mezcladas: la dirección por tramo se lee
+                # ahora, mientras las lecturas siguen en el buffer del array.
+                mix = None
+                if MIX_TRIM_ENABLED and wake.is_awake() and not wake_prefix:
+                    doa_segs = (doa_by_segment(spatial.angles, spatial.focus,
+                                               vad.last_span[0], len(audio))
+                                if spatial.enabled and vad.last_span is not None else None)
+                    mix = MixContext(doa_segs, spatial.focus.focus)
                 # Dirección: ¿viene de quien lo llamó? (y nunca de un sector
                 # de ruido propio del robot). Sin array, no decide nada.
                 if spatial.enabled and vad.last_span is not None:
                     reading = spatial.reading(*vad.last_span)
                     accepted, why = spatial.focus.judge(reading)
-                    if not accepted:
+                    if not accepted and mix is not None and why == "fuera de foco":
+                        # No se tira todavía: el hilo de STT intenta quedarse
+                        # con los tramos de quien llamó (y loguea el bloque MIX).
+                        mix.doa_rejected = f"dirección: {reading.in_focus:.0%} en foco"
+                        mix.doa_values = dict(
+                            dir=_deg(reading.direction),
+                            foco=f"{_deg(spatial.focus.focus)}±{DOA_TOLERANCE_DEG:.0f}",
+                            en_foco=f"{reading.in_focus:.0%}", lecturas=reading.n)
+                    elif not accepted:
                         counters.off_focus += 1
                         drop("DOA", why, dir=_deg(reading.direction),
                              foco=f"{_deg(spatial.focus.focus)}±{DOA_TOLERANCE_DEG:.0f}",
@@ -953,7 +1080,7 @@ def main() -> None:
                               dir=reading.direction, focus=spatial.focus.focus,
                               in_focus=round(reading.in_focus, 2), readings=reading.n)
                         continue
-                    if wake.is_awake() and reading.n >= 2:
+                    elif wake.is_awake() and reading.n >= 2:
                         spatial.focus.follow(reading.direction)
                     dbg(f"dirección {_deg(reading.direction)} ({why}, "
                         f"{reading.in_focus:.0%} en foco, {reading.n} lecturas)", "DOA")
@@ -965,7 +1092,7 @@ def main() -> None:
                           min_level=round(wake.min_level(), 5),
                           audio_s=round(len(audio) / 16000.0, 2))
                     continue
-                audio_queue.put((audio, level, time.monotonic(), wake_prefix))
+                audio_queue.put((audio, level, time.monotonic(), wake_prefix, mix))
 
     except KeyboardInterrupt:
         info("MAIN", "Stopped.")

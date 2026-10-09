@@ -309,6 +309,21 @@ class SpeakerLock:
                                f"misma voz por el perfil guardado (sólo sesión {similarity:.2f})")
         return Verdict(False, similarity, "otra voz")
 
+    def similarity(self, audio: np.ndarray) -> float | None:
+        """Similitud de un tramo suelto con quien llamó (la mejor entre la
+        sesión y sesión + perfil, igual que judge()). None = sin referencia.
+        La usa mix_trim.py para juzgar una frase por ventanas."""
+        if not self.enabled:
+            return None
+        ref, blend = self._reference()
+        if ref is None:
+            return None
+        emb = self._embedder.embed(audio)
+        sim = float(ref @ emb)
+        if blend is not None:
+            sim = max(sim, float(blend @ emb))
+        return sim
+
     def follow(self, audio: np.ndarray, similarity: float | None = None,
                trusted: bool = False) -> None:
         """Frase aceptada de quien me llamó: suma a la referencia. Se queda
