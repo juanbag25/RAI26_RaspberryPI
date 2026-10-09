@@ -410,7 +410,7 @@ menor impacto:
 5. **Hablarle cerca**: con el robot en marcha la diferencia la hace la
    distancia; la calibración avisa si el ruido llega a tu voz.
 
-### Orden de corte mientras el robot habla (experimental)
+### Orden de corte mientras el robot habla
 
 Por default, mientras el robot habla el mic se descarta entero
 (`SPEAK_LISTEN_MODE=mute`). Con `SPEAK_LISTEN_MODE=keyword` el spotter sigue
@@ -418,8 +418,8 @@ escuchando **sólo** «para rai» / «basta rai» (`SPEAK_STOP_PHRASES`) o «oye
 rai»: si viene de fuera del sector del parlante (`DOA_SPEAKER_SECTOR`, se mide
 con `mic_level.py --doa` mientras el robot habla) y suena `SPEAK_BARGE_RATIO`
 veces más fuerte que el parlante, le manda `stop` al orquestador, que se calla
-(y con «oye rai», además contesta «Sí, dime»). Dejarlo en `mute` hasta probar
-que no se corta solo.
+(y con «oye rai», además contesta «Sí, dime»). Si se corta solo con su propia
+voz, subir `SPEAK_BARGE_RATIO` o fijar `DOA_SPEAKER_SECTOR`.
 
 ## Foco del mic (rechazo de campo lejano)
 

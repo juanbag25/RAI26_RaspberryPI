@@ -447,7 +447,7 @@ SPEAKER_FORGET_DAYS = _env_float("SPEAKER_FORGET_DAYS", 30)
 #   fuera del sector del parlante (DOA_SPEAKER_SECTOR) y suena
 #   SPEAK_BARGE_RATIO veces más fuerte que el parlante en ese momento. Manda
 #   `stop` al orquestador (y si fue «oye rai», además re-despierta). Requiere
-#   WAKE_MODE=audio. Dejar en "mute" hasta probar que no corta solo.
+#   WAKE_MODE=audio.
 SPEAK_LISTEN_MODE = _env_str("SPEAK_LISTEN_MODE", "mute").lower()
 # Dos palabras como WAKE_PHRASES (una sola, "para", aparece en cualquier frase
 # del propio robot); "rai" suele salir "ray"/"rey" en Vosk, por eso las variantes.
