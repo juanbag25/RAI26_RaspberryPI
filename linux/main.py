@@ -1,6 +1,7 @@
 import json
 import os
 import queue
+import signal
 import socket
 import struct
 import sys
@@ -56,9 +57,9 @@ from config import (
 )
 from ctrl_server import SpeakMute, start_in_background
 from doa import DoaFocus, DoaReading, in_any_sector, parse_sectors, to_robot_frame
-from log import DEBUG, dbg, dim, drop, err, fmt, info, ok, warn
+from log import DEBUG, dbg, dim, drop, err, event, fmt, info, ok, persist, warn
 from respeaker import ReSpeaker
-from speaker_id import SpeakerLock, load_embedder
+from speaker_id import SpeakerLock, load_embedder, load_memory
 from vad import VoiceActivityDetector
 from wake_word import WakeWord, normalize
 
@@ -156,6 +157,39 @@ def send_transcript_to_orchestrator(
     return send_to_orchestrator(payload, ip, port, quiet=quiet)
 
 
+def config_snapshot() -> dict:
+    """Todos los knobs de config.py (MAYÚSCULAS, tipos simples) con el valor
+    con que arrancó: para el log persistente, así cada análisis sabe con qué
+    parámetros se midió. config.py no tiene secretos (la API key va por env)."""
+    import config
+    snap = {}
+    for name in dir(config):
+        if not name.isupper() or name.endswith("_PATH"):
+            continue
+        value = getattr(config, name)
+        if isinstance(value, (bool, int, float, str)):
+            snap[name] = value
+        elif isinstance(value, (tuple, list)) and all(isinstance(v, (str, int, float)) for v in value):
+            snap[name] = list(value)
+        elif isinstance(value, dict):
+            snap[name] = {str(k): v for k, v in value.items()}
+    return snap
+
+
+def _git_version() -> str:
+    """Commit de este código (+ "-dirty" si hay cambios sin commitear)."""
+    import subprocess
+    here = os.path.dirname(os.path.abspath(__file__))
+    try:
+        rev = subprocess.run(["git", "-C", here, "rev-parse", "--short", "HEAD"],
+                             capture_output=True, text=True, timeout=3).stdout.strip()
+        dirty = subprocess.run(["git", "-C", here, "status", "--porcelain", "--untracked-files=no"],
+                               capture_output=True, text=True, timeout=3).stdout.strip()
+        return (rev or "?") + ("-dirty" if dirty else "")
+    except (OSError, subprocess.SubprocessError):
+        return "?"
+
+
 class Counters:
     """Totales del proceso, para el heartbeat."""
 
@@ -197,6 +231,90 @@ def transcribe_worker(
     `text_wake`: sin spotter, el wake (y la referencia de voz) sale del texto.
     """
     judge_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="speaker")
+
+    def process(item, rec: dict) -> str:
+        """Una utterance: STT + voz + wake + envío. Devuelve su destino
+        (outcome del evento "stt" del log persistente) y va llenando `rec`."""
+        # wake_prefix: la frase empieza con el «oye rai» que oyó el spotter
+        # (la persona siguió hablando sin esperar el «Sí, dime»).
+        audio, level, queued_at, wake_prefix = item
+        age = time.monotonic() - queued_at
+        seconds = len(audio) / 16000.0
+        rec.update(audio_s=round(seconds, 2), level=round(level, 5), age_s=round(age, 2),
+                   wake_prefix=wake_prefix, awake=wake.is_awake())
+        if age > MAX_QUEUE_AGE_S:
+            counters.dropped_stale += 1
+            drop("STT", "vieja en cola", edad_s=f"{age:.1f}", nivel=level)
+            return "vieja"
+        pending = audio_queue.qsize()
+        if pending:
+            warn("STT", f"{pending} utterances esperando en cola (Groq lento?)")
+        dbg(f"transcribiendo {seconds:.1f}s de audio...", "STT")
+        # La frase del «oye rai» (wake_prefix) es la referencia misma: no se
+        # compara. Dormido no hay referencia contra la cual comparar.
+        judging = speaker.enabled and wake.is_awake() and not wake_prefix
+        verdict = judge_pool.submit(speaker.judge, audio) if judging else None
+        t0 = time.monotonic()
+        text, stt_confidence = transcriber.transcribe(audio)
+        elapsed = time.monotonic() - t0
+        counters.transcribed += 1
+        rec.update(text=text, stt_s=round(elapsed, 3), conf=stt_confidence)
+        if verdict is not None:
+            verdict = verdict.result()
+            rec.update(spk_sim=verdict.similarity, spk_ok=verdict.accepted,
+                       spk_why=verdict.why, spk_ref_s=round(speaker.ref_seconds(), 1),
+                       voice=speaker.voice_label())
+        if not text:
+            counters.empty += 1
+            drop("STT", "Groq no devolvió texto (error arriba, o audio inaudible)",
+                 audio_s=f"{seconds:.1f}", nivel=level)
+            return "vacia"
+        info("STT", f"«{text}» ({elapsed:.2f}s, confianza={stt_confidence:.2f})")
+        if is_prompt_echo(text):
+            drop("STT", "eco del prompt de Whisper: es ruido, no habló nadie")
+            return "eco_prompt"
+        if wake_prefix:
+            text = wake.strip_wake(text)
+            if not text:
+                # Al final era sólo el nombre: ahora sí, «Sí, dime».
+                dim("WAKE", "la frase era sólo el «oye rai»: pido el «Sí, dime»")
+                wake.announce()
+                return "solo_wake"
+        if (verdict is not None and not verdict.accepted
+                and text_wake and wake.says_name(text)):
+            # Modo texto: otra persona que lo llama por su nombre toma el foco
+            # (en modo audio eso lo decide el spotter, en handle_wake).
+            info("SPK", f"otra voz (sim={verdict.similarity:.2f}) pero me llamó "
+                 "por mi nombre: le paso el foco")
+        elif verdict is not None and not speaker.report(verdict, level):
+            counters.other_voice += 1
+            return "otra_voz"
+        # Wake word: hasta que lo llamen por su nombre, no sale nada de acá.
+        wakes_before = wake.wake_count()
+        payload = wake.filter(text, level)
+        if wake.wake_count() != wakes_before:
+            # Esta frase lo despertó (modo texto, o «rai» dicho estando
+            # despierto): su voz es la nueva referencia.
+            speaker.lock(audio)
+            rec["woke"] = True
+        elif payload:
+            # Para la memoria de voces sólo cuenta lo bien verificado: la
+            # frase del wake o una aceptada con similitud alta.
+            speaker.follow(audio, verdict.similarity if verdict is not None else None,
+                           trusted=wake_prefix)
+        if not payload:
+            return "filtrada_wake"
+        rec["sent_text"] = payload
+        if send_transcript_to_orchestrator(
+            payload, stt_confidence, orchestrator_ip, orchestrator_port
+        ):
+            counters.sent += 1
+            # No dormirse mientras el robot piensa la respuesta.
+            wake.await_reply()
+            return "enviada"
+        counters.send_failed += 1
+        return "envio_fallido"
+
     while True:
         item = audio_queue.get()
         if item is None:  # señal de shutdown
@@ -213,73 +331,17 @@ def transcribe_worker(
             if newer is None:  # señal de shutdown
                 return
             drop("STT", "superada por una más nueva en cola")
+            event("stt", outcome="superada", audio_s=round(len(item[0]) / 16000.0, 2),
+                  level=round(item[1], 5))
             item = newer
-        # wake_prefix: la frase empieza con el «oye rai» que oyó el spotter
-        # (la persona siguió hablando sin esperar el «Sí, dime»).
-        audio, level, queued_at, wake_prefix = item
-        age = time.monotonic() - queued_at
-        if age > MAX_QUEUE_AGE_S:
-            counters.dropped_stale += 1
-            drop("STT", "vieja en cola", edad_s=f"{age:.1f}", nivel=level)
-            continue
-        seconds = len(audio) / 16000.0
-        pending = audio_queue.qsize()
-        if pending:
-            warn("STT", f"{pending} utterances esperando en cola (Groq lento?)")
-        dbg(f"transcribiendo {seconds:.1f}s de audio...", "STT")
-        # La frase del «oye rai» (wake_prefix) es la referencia misma: no se
-        # compara. Dormido no hay referencia contra la cual comparar.
-        judging = speaker.enabled and wake.is_awake() and not wake_prefix
-        verdict = judge_pool.submit(speaker.judge, audio) if judging else None
-        t0 = time.monotonic()
-        text, stt_confidence = transcriber.transcribe(audio)
-        elapsed = time.monotonic() - t0
-        counters.transcribed += 1
-        if verdict is not None:
-            verdict = verdict.result()
-        if not text:
-            counters.empty += 1
-            drop("STT", "Groq no devolvió texto (error arriba, o audio inaudible)",
-                 audio_s=f"{seconds:.1f}", nivel=level)
-            continue
-        info("STT", f"«{text}» ({elapsed:.2f}s, confianza={stt_confidence:.2f})")
-        if is_prompt_echo(text):
-            drop("STT", "eco del prompt de Whisper: es ruido, no habló nadie")
-            continue
-        if wake_prefix:
-            text = wake.strip_wake(text)
-            if not text:
-                # Al final era sólo el nombre: ahora sí, «Sí, dime».
-                dim("WAKE", "la frase era sólo el «oye rai»: pido el «Sí, dime»")
-                wake.announce()
-                continue
-        if (verdict is not None and not verdict.accepted
-                and text_wake and wake.says_name(text)):
-            # Modo texto: otra persona que lo llama por su nombre toma el foco
-            # (en modo audio eso lo decide el spotter, en handle_wake).
-            info("SPK", f"otra voz (sim={verdict.similarity:.2f}) pero me llamó "
-                 "por mi nombre: le paso el foco")
-        elif verdict is not None and not speaker.report(verdict, level):
-            counters.other_voice += 1
-            continue
-        # Wake word: hasta que lo llamen por su nombre, no sale nada de acá.
-        wakes_before = wake.wake_count()
-        payload = wake.filter(text, level)
-        if wake.wake_count() != wakes_before:
-            # Esta frase lo despertó (modo texto, o «rai» dicho estando
-            # despierto): su voz es la nueva referencia.
-            speaker.lock(audio)
-        elif payload:
-            speaker.follow(audio)
-        if payload:
-            if send_transcript_to_orchestrator(
-                payload, stt_confidence, orchestrator_ip, orchestrator_port
-            ):
-                counters.sent += 1
-                # No dormirse mientras el robot piensa la respuesta.
-                wake.await_reply()
-            else:
-                counters.send_failed += 1
+        rec: dict = {}
+        try:
+            outcome = process(item, rec)
+        except Exception as exc:  # noqa: BLE001 - que una frase rara no mate el hilo
+            err("STT", f"error procesando la frase: {type(exc).__name__}: {exc}")
+            outcome = "error"
+            rec["error"] = f"{type(exc).__name__}: {exc}"
+        event("stt", outcome=outcome, **rec)
 
 
 # Cada cuánto el emisor de eventos mira si hubo un wake o si se durmió. Marca
@@ -507,6 +569,9 @@ def heartbeat_worker(
             if speaker.enabled:
                 ref_s = speaker.ref_seconds()
                 awake += f" voz_ref={ref_s:.1f}s" if ref_s else " voz_ref=ninguna"
+                known = speaker.voice_label()
+                if known:
+                    awake += f" ({known})"
             parts.append(awake)
         else:
             parts.append("dormido")
@@ -527,6 +592,16 @@ def heartbeat_worker(
                 parts.append(f"spotter atrasado: {sp.dropped} frames perdidos (¿CPU?)")
                 problem = True
 
+        event("hb", frames=st.frames, muted_frames=muted_delta,
+              speech_s=round(st.speech_frames * FRAME_MS / 1000, 2),
+              loud_s=round(st.loud_speech_frames * FRAME_MS / 1000, 2),
+              rms_max=round(st.max_rms, 5), rms_mean=round(st.mean_rms, 5),
+              noise=round(vad.noise_floor, 5), open=round(vad.open_threshold(), 5),
+              near=round(vad.near_threshold(), 5), opened=st.opened, accepted=st.accepted,
+              rejected=st.rejected, weak=st.weak, awake=wake.is_awake(),
+              muted=mute.is_muted(), queue=audio_queue.qsize(),
+              voice=speaker.voice_label(), voice_ref_s=round(speaker.ref_seconds(), 1),
+              totals=dict(vars(counters)))
         line = " · ".join(parts)
         if problem:
             warn("HB", line)
@@ -543,7 +618,16 @@ def main() -> None:
     ORCHESTRATOR_IP = os.getenv("ORCHESTRATOR_IP", Target_IP)  # <-- ¡Cambia esto por la IP de tu PC!
     ORCHESTRATOR_PORT = 9000
 
+    log_dir = persist()
     info("MAIN", "=== STT Pi arrancando ===")
+    if log_dir:
+        dim("LOG", f"log persistente en {log_dir} (stt-AAAA-MM-DD.jsonl; ver log_report.py)")
+
+    # systemctl stop/restart manda SIGTERM: tratarlo como Ctrl+C para que el
+    # finally corra (aprende la conversación abierta, apaga los LEDs).
+    def _on_sigterm(_signum, _frame):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, _on_sigterm)
 
     # Alimentación: tensión de entrada y flags de undervoltage de la Pi.
     report_power()
@@ -582,7 +666,8 @@ def main() -> None:
              "README): sin DoA ni parámetros DSP, foco sólo por nivel")
     spatial = Spatial(array)
     # Huella de voz de quien despertó al robot (speaker_id.py).
-    speaker = SpeakerLock(load_embedder())
+    embedder = load_embedder()
+    speaker = SpeakerLock(embedder, load_memory(embedder))
     if speaker.enabled:
         ok("SPK", "verificación de hablante activa: despierto, sólo escucho la voz "
            f"que me llamó (sim>={SPEAKER_MIN_SIMILARITY:g})")
@@ -657,6 +742,12 @@ def main() -> None:
     if WAKE_WORD_ENABLED:
         events.start()
 
+    event("config", **config_snapshot(), git=_git_version(), host=socket.gethostname(),
+          orchestrator=f"{ORCHESTRATOR_IP}:{ORCHESTRATOR_PORT}", vad_engine=vad.engine,
+          spotter=spotter is not None, speaker=speaker.enabled,
+          voices=[v.label for v in speaker.known_voices()], heartbeat_s=HEARTBEAT_S,
+          max_queue_age_s=MAX_QUEUE_AGE_S)
+
     if HEARTBEAT_S > 0:
         threading.Thread(
             target=heartbeat_worker,
@@ -675,6 +766,8 @@ def main() -> None:
         if spatial.enabled and reading.n >= 2 and reading.blocked >= 0.6:
             drop("WAKE", f"«{heard}» desde un sector de ruido del robot",
                  dir=_deg(reading.direction))
+            event("wake", heard=heard, accepted=False, reason="sector_ruido",
+                  dir=reading.direction)
             return False
         if wake.is_awake():
             # Traspaso: otra persona (o la misma) vuelve a llamarlo. Tiene que
@@ -686,7 +779,14 @@ def main() -> None:
             if level < near and not same_place:
                 drop("WAKE", f"otro «{heard}» pero lejano: no cambio el foco",
                      nivel=level, umbral=near, dir=_deg(reading.direction))
+                event("wake", heard=heard, accepted=False, reason="traspaso_lejano",
+                      level=round(level, 5), near=round(near, 5))
                 return False
+        event("wake", heard=heard, accepted=True, was_awake=wake.is_awake(),
+              level=round(vad.current_level(), 5), near=round(vad.near_threshold(), 5),
+              noise=round(vad.noise_floor, 5), in_speech=vad.in_speech,
+              voice_s=None if voice is None else round(len(voice) / 16000.0, 2),
+              dir=reading.direction if spatial.enabled else None)
         old_focus = spatial.focus.focus
         wake.wake_from_audio(announce=announce)
         if voice is not None:
@@ -836,6 +936,8 @@ def main() -> None:
                     counters.asleep += 1
                     drop("WAKE", f"dormido: no transcribo hasta oír «{WAKE_PHRASES[0]}»",
                          nivel=level)
+                    event("stt", outcome="dormido", level=round(level, 5),
+                          audio_s=round(len(audio) / 16000.0, 2))
                     continue
                 # Dirección: ¿viene de quien lo llamó? (y nunca de un sector
                 # de ruido propio del robot). Sin array, no decide nada.
@@ -847,6 +949,9 @@ def main() -> None:
                         drop("DOA", why, dir=_deg(reading.direction),
                              foco=f"{_deg(spatial.focus.focus)}±{DOA_TOLERANCE_DEG:.0f}",
                              en_foco=f"{reading.in_focus:.0%}", lecturas=reading.n)
+                        event("stt", outcome="fuera_de_foco", level=round(level, 5),
+                              dir=reading.direction, focus=spatial.focus.focus,
+                              in_focus=round(reading.in_focus, 2), readings=reading.n)
                         continue
                     if wake.is_awake() and reading.n >= 2:
                         spatial.focus.follow(reading.direction)
@@ -856,12 +961,17 @@ def main() -> None:
                 # al nivel de esta conversación (el fondo no gasta Whisper).
                 if not wake.accepts_level(level):
                     counters.unfocused += 1
+                    event("stt", outcome="nivel_atencion", level=round(level, 5),
+                          min_level=round(wake.min_level(), 5),
+                          audio_s=round(len(audio) / 16000.0, 2))
                     continue
                 audio_queue.put((audio, level, time.monotonic(), wake_prefix))
 
     except KeyboardInterrupt:
         info("MAIN", "Stopped.")
     finally:
+        # Aprende la conversación abierta antes de salir (Ctrl+C, systemd).
+        speaker.close()
         if array is not None:
             array.stop_polling()
             array.leds_off()

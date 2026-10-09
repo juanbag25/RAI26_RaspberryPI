@@ -5,6 +5,8 @@ venv/
 *.bin
 *.pt
 models/
+data/
+logs/
 *.wav
 *.mp3
 .env

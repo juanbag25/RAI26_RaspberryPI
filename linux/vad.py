@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import webrtcvad
 
-from log import dbg, dim, drop, fmt, ok, warn
+from log import dbg, dim, drop, event, fmt, ok, warn
 
 from config import (
     CLOSE_RMS_RATIO,
@@ -159,6 +159,10 @@ class VoiceActivityDetector:
         if not self._in_speech:
             return False
         drop("VAD", reason, voz_ms=self._speech_frame_count * FRAME_MS)
+        event("utt", accepted=False, reason="descartada", why=reason,
+              speech_ms=self._speech_frame_count * FRAME_MS,
+              total_ms=len(self._utterance) * FRAME_MS,
+              level=round(self._utterance_level(), 5), noise=round(self._noise_floor, 5))
         self._stats.rejected += 1
         self._reset_utterance()
         return True
@@ -277,6 +281,17 @@ class VoiceActivityDetector:
                 + fmt(ruido=self._noise_floor, abre=self.open_threshold()))
         if too_long or self._silence_count >= self._silence_frames_to_close:
             accepted = self._utterance_accepted()
+            levels = self._speech_levels
+            event("utt", accepted=accepted, reason=self._close_reason,
+                  speech_ms=self._speech_frame_count * FRAME_MS,
+                  total_ms=len(self._utterance) * FRAME_MS, too_long=too_long,
+                  level=round(self._utterance_level(), 5),
+                  level_p50=round(float(np.percentile(levels, 50)), 5) if levels else 0.0,
+                  level_max=round(max(levels), 5) if levels else 0.0,
+                  near=round(self.near_threshold(), 5), open=round(self.open_threshold(), 5),
+                  cont=round(self.continue_threshold(), 5),
+                  noise=round(self._noise_floor, 5), start=round(self._utt_start_t, 3),
+                  end=round(t, 3))
             audio = self._finalize_utterance() if accepted else None
             if accepted:
                 st.accepted += 1
@@ -309,6 +324,9 @@ class VoiceActivityDetector:
         if self._weak_gap * FRAME_MS < _WEAK_GAP_MS:
             return
         if self._weak_frames >= self._min_speech_frames:
+            event("weak", speech_ms=self._weak_frames * FRAME_MS,
+                  rms_max=round(self._weak_max_rms, 5), open=round(self.open_threshold(), 5),
+                  noise=round(self._noise_floor, 5))
             drop("VAD", "oí voz pero no llegó a abrir (floja o entrecortada)",
                  voz_ms=self._weak_frames * FRAME_MS, rms_max=self._weak_max_rms,
                  abre=self.open_threshold(), ruido=self._noise_floor)
@@ -316,8 +334,11 @@ class VoiceActivityDetector:
         self._reset_weak()
 
     def _utterance_accepted(self) -> bool:
-        """Segunda etapa del filtro: ¿fue voz real y de cerca?"""
+        """Segunda etapa del filtro: ¿fue voz real y de cerca? Deja el motivo
+        en `_close_reason` (para el log persistente)."""
+        self._close_reason = "ok"
         if self._speech_frame_count < self._min_speech_frames:
+            self._close_reason = "corta"
             drop("VAD", "muy corta", voz_ms=self._speech_frame_count * FRAME_MS,
                  minimo_ms=MIN_UTTERANCE_MS)
             return False
@@ -325,6 +346,7 @@ class VoiceActivityDetector:
         level = self._utterance_level()
         near_threshold = self.near_threshold()
         if level < near_threshold:
+            self._close_reason = "lejana"
             drop("VAD", "lejana/floja", nivel=level, umbral=near_threshold,
                  ruido=self._noise_floor)
             return False

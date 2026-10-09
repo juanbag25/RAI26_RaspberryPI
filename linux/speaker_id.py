@@ -18,6 +18,10 @@ Cómo funciona:
    solo es ~1 s de voz y la huella sale ruidosa; con más audio mejora.
 4. Al dormirse se olvida (`clear()`). Otro «oye rai» que pase el filtro de
    main.py (otra persona toma el foco) fija una referencia nueva.
+5. Memoria de voces (speaker_memory.py, SPEAKER_MEMORY): antes de olvidar la
+   sesión, su audio verificado se aprende y queda guardado en la Pi. Al
+   despertar, si el «oye rai» es de una voz conocida, la referencia arranca
+   con su perfil y no sólo con ~1 s de audio.
 
 Modo `text` (sin spotter): la referencia es la frase que dijo «rai».
 
@@ -39,24 +43,33 @@ from __future__ import annotations
 
 import os
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 import numpy as np
 
 from config import (
     SAMPLE_RATE,
+    SPEAKER_LEARN_MIN_S,
+    SPEAKER_LEARN_MIN_SIM,
+    SPEAKER_MEMORY,
     SPEAKER_MIN_AUDIO_S,
     SPEAKER_MIN_REF_S,
     SPEAKER_MIN_SIMILARITY,
     SPEAKER_MODEL_PATH,
+    SPEAKER_PROFILE_WEIGHT_S,
+    SPEAKER_RECOGNIZE_SIM,
     SPEAKER_REF_MAX_S,
+    SPEAKER_SESSION_MAX_S,
     SPEAKER_VERIFY_ENABLED,
 )
-from log import dim, drop, ok, warn
+from log import dim, drop, event, info, ok, warn
+from speaker_memory import Voice, VoiceMemory
 
 
 class SpeakerEmbedder:
-    """Audio float32 mono 16 kHz -> embedding normalizado (norma 1)."""
+    """Audio float32 mono 16 kHz -> embedding normalizado (norma 1).
+    Thread-safe (lo usan el hilo de STT y el que aprende sesiones)."""
 
     def __init__(self, model_path: str) -> None:
         import sherpa_onnx
@@ -66,13 +79,15 @@ class SpeakerEmbedder:
         if not config.validate():
             raise ValueError(f"configuración inválida para {model_path}")
         self._extractor = sherpa_onnx.SpeakerEmbeddingExtractor(config)
+        self._mutex = threading.Lock()
         self.dim = self._extractor.dim
 
     def embed(self, audio: np.ndarray) -> np.ndarray:
-        stream = self._extractor.create_stream()
-        stream.accept_waveform(SAMPLE_RATE, np.ascontiguousarray(audio, dtype=np.float32))
-        stream.input_finished()
-        vec = np.asarray(self._extractor.compute(stream), dtype=np.float32)
+        with self._mutex:
+            stream = self._extractor.create_stream()
+            stream.accept_waveform(SAMPLE_RATE, np.ascontiguousarray(audio, dtype=np.float32))
+            stream.input_finished()
+            vec = np.asarray(self._extractor.compute(stream), dtype=np.float32)
         norm = float(np.linalg.norm(vec))
         return vec / norm if norm > 0 else vec
 
@@ -92,6 +107,23 @@ def load_embedder() -> SpeakerEmbedder | None:
         return None
 
 
+def load_memory(embedder: SpeakerEmbedder | None) -> VoiceMemory | None:
+    """Memoria de voces (speaker_memory.py) según SPEAKER_MEMORY, o None."""
+    if embedder is None or SPEAKER_MEMORY == "off":
+        return None
+    if SPEAKER_MEMORY not in ("on", "observe"):
+        warn("CONFIG", f"SPEAKER_MEMORY={SPEAKER_MEMORY!r} desconocido (on|observe|off): uso off")
+        return None
+    try:
+        memory = VoiceMemory()
+    except Exception as exc:  # noqa: BLE001 - permisos, disco...
+        warn("SPK", f"no pude abrir la memoria de voces ({type(exc).__name__}: {exc}); sigo sin ella")
+        return None
+    names = ", ".join(v.label for v in memory.voices()) or "ninguna todavía"
+    info("SPK", f"memoria de voces ({SPEAKER_MEMORY}): {names}")
+    return memory
+
+
 @dataclass
 class Verdict:
     accepted: bool
@@ -99,61 +131,161 @@ class Verdict:
     why: str
 
 
-class SpeakerLock:
-    """Referencia de voz de quien despertó al robot. Thread-safe: `lock()` y
-    `clear()` vienen del hilo de audio / de eventos; `judge()` y `follow()`
-    del hilo de STT (el embedding tarda, no frena la captura)."""
+def _seconds(chunks: list[np.ndarray]) -> float:
+    return sum(len(a) for a in chunks) / SAMPLE_RATE
 
-    def __init__(self, embedder: SpeakerEmbedder | None) -> None:
+
+class SpeakerLock:
+    """Referencia de voz de quien despertó al robot (una "sesión": de «oye
+    rai» a dormirse). Thread-safe: `lock()` y `clear()` vienen del hilo de
+    audio / de eventos; `judge()` y `follow()` del hilo de STT (el embedding
+    tarda, no frena la captura). Aprender la sesión cerrada corre en un hilo
+    propio.
+
+    Con memoria de voces (SPEAKER_MEMORY=on): si el «oye rai» es de una voz
+    conocida, una frase se acepta si se parece a la sesión O a la sesión
+    mezclada con el perfil guardado. El perfil sólo puede sumar aceptaciones
+    tuyas, no quitarlas."""
+
+    def __init__(self, embedder: SpeakerEmbedder | None,
+                 memory: VoiceMemory | None = None) -> None:
         self._embedder = embedder
+        self._memory = memory
+        self._learner = ThreadPoolExecutor(max_workers=1, thread_name_prefix="spk-learn")
         self._mutex = threading.Lock()
-        self._ref_audio: list[np.ndarray] = []  # [0] = la frase del wake
-        self._ref: np.ndarray | None = None     # embedding de _ref_audio (cache)
-        self._gen = 0                           # cambia en cada lock()/clear()
+        # Un solo cálculo de referencia a la vez (el de segundo plano tras el
+        # wake y el de la primera frase): el segundo usa el resultado cacheado.
+        self._computing = threading.Lock()
+        self._gen = 0                            # cambia en cada lock()/clear()
+        self._new_session([])
+
+    def _new_session(self, ref_audio: list[np.ndarray]) -> None:
+        # Llamar con _mutex tomado (o desde __init__).
+        self._gen += 1
+        self._ref_audio = ref_audio              # [0] = la frase del wake
+        self._learn_audio = list(ref_audio)      # sólo audio verificado
+        self._ref: np.ndarray | None = None      # huella de _ref_audio (cache)
+        self._voice: Voice | None = None         # voz conocida (memoria)
+        self._recognized = False                 # ya se buscó en la memoria
 
     @property
     def enabled(self) -> bool:
         return self._embedder is not None
 
     def lock(self, audio: np.ndarray | None) -> None:
-        """Wake nuevo: la referencia pasa a ser `audio` (la frase del «oye
-        rai»). None o muy corto: la toma la primera frase aceptada."""
+        """Wake nuevo: cierra la sesión anterior (y la aprende) y la
+        referencia pasa a ser `audio` (la frase del «oye rai»). None o muy
+        corto: la toma la primera frase aceptada."""
         if not self.enabled:
             return
+        seconds = 0.0 if audio is None else len(audio) / SAMPLE_RATE
         with self._mutex:
-            self._gen += 1
-            self._ref = None
-            seconds = 0.0 if audio is None else len(audio) / SAMPLE_RATE
-            if seconds >= SPEAKER_MIN_REF_S:
-                self._ref_audio = [audio]
-                dim("SPK", f"referencia de voz: la frase del wake ({seconds:.1f}s)")
-            else:
-                self._ref_audio = []
-                dim("SPK", f"«oye rai» muy corto para huella ({seconds:.1f}s < "
-                    f"{SPEAKER_MIN_REF_S:g}s): la toma la primera frase")
+            self._finish_session()
+            self._new_session([audio] if seconds >= SPEAKER_MIN_REF_S else [])
+        if seconds >= SPEAKER_MIN_REF_S:
+            dim("SPK", f"referencia de voz: la frase del wake ({seconds:.1f}s)")
+            # Huella + reconocimiento ya, en segundo plano: la primera frase
+            # no espera y el «te reconozco» sale enseguida en el log.
+            self._learner.submit(self._reference)
+        else:
+            dim("SPK", f"«oye rai» muy corto para huella ({seconds:.1f}s < "
+                f"{SPEAKER_MIN_REF_S:g}s): la toma la primera frase")
 
     def clear(self) -> None:
+        """Se durmió: aprende la sesión y la olvida."""
         with self._mutex:
-            self._gen += 1
-            self._ref_audio = []
-            self._ref = None
+            self._finish_session()
+            self._new_session([])
+
+    def close(self) -> None:
+        """Al salir: aprende la sesión abierta y espera a que se guarde."""
+        self.clear()
+        self._learner.shutdown(wait=True)
+
+    def _finish_session(self) -> None:
+        # Llamar con _mutex tomado.
+        if self._memory is None or not self._learn_audio:
+            return
+        audio = list(self._learn_audio)
+        seconds = _seconds(audio)
+        recognized = self._voice.id if self._voice else None
+        if seconds < SPEAKER_LEARN_MIN_S:
+            event("spk_learn", decision="corta", seconds=round(seconds, 1),
+                  recognized=recognized)
+            dim("SPK", f"sesión de {seconds:.1f}s de voz verificada: corta para aprender "
+                f"(mínimo {SPEAKER_LEARN_MIN_S:g}s)")
+            return
+        self._learner.submit(self._learn, audio, seconds, recognized)
+
+    def _learn(self, audio: list[np.ndarray], seconds: float, recognized: str | None) -> None:
+        try:
+            emb = self._embedder.embed(np.concatenate(audio))
+            result = self._memory.learn(emb, seconds, recognized)
+            event("spk_learn", decision=result.decision, seconds=round(seconds, 1),
+                  voice=result.voice.id if result.voice else None,
+                  sim=None if result.similarity is None else round(result.similarity, 3),
+                  recognized=recognized)
+            self._memory.report(result, seconds, recognized)
+        except Exception as exc:  # noqa: BLE001 - disco lleno, permisos...
+            warn("SPK", f"no pude aprender la sesión ({type(exc).__name__}: {exc})")
 
     def ref_seconds(self) -> float:
         """Segundos de audio en la referencia (0 = sin referencia)."""
         with self._mutex:
-            return sum(len(a) for a in self._ref_audio) / SAMPLE_RATE
+            return _seconds(self._ref_audio)
 
-    def _reference(self) -> np.ndarray | None:
-        """Embedding de toda la referencia (se recalcula si cambió)."""
+    def known_voices(self) -> list[Voice]:
+        return self._memory.voices() if self._memory is not None else []
+
+    def voice_label(self) -> str | None:
+        """Voz conocida de esta sesión (None = desconocida / sin memoria)."""
+        with self._mutex:
+            return self._voice.label if self._voice else None
+
+    def _reference(self) -> tuple[np.ndarray | None, np.ndarray | None]:
+        """(huella de la sesión, huella de sesión + perfil guardado o None).
+        Se recalcula si cambió; la primera vez busca la voz en la memoria."""
+        with self._computing:
+            return self._compute_reference()
+
+    def _compute_reference(self) -> tuple[np.ndarray | None, np.ndarray | None]:
         with self._mutex:
             if self._ref is not None or not self._ref_audio:
-                return self._ref
+                return self._ref, self._blend()
             gen, audio = self._gen, np.concatenate(self._ref_audio)
+            look_up = self._memory is not None and not self._recognized
         ref = self._embedder.embed(audio)
+        voice, sim = self._memory.recognize(ref) if look_up else (None, 0.0)
         with self._mutex:
-            if gen == self._gen:
-                self._ref = ref
-        return ref
+            if gen != self._gen:  # otra sesión empezó mientras calculaba
+                return ref, None
+            self._ref = ref
+            if look_up:
+                self._recognized = True
+                self._voice = voice
+            blend = self._blend()
+        if look_up:
+            event("spk_recognize", voice=voice.id if voice else None,
+                  best_sim=round(sim, 3) if self._memory.voices() else None,
+                  known=len(self._memory.voices()),
+                  ref_s=round(len(audio) / SAMPLE_RATE, 2))
+            if voice is not None:
+                use = ("la uso de referencia" if SPEAKER_MEMORY == "on"
+                       else "modo observe: no la uso")
+                ok("SPK", f"te reconozco: {voice.label} sim={sim:.2f} "
+                   f"({voice.sessions} sesiones); {use}")
+            elif self._memory.voices():
+                dim("SPK", f"voz desconocida (la más parecida sim={sim:.2f} < "
+                    f"{SPEAKER_RECOGNIZE_SIM:g})")
+        return ref, blend
+
+    def _blend(self) -> np.ndarray | None:
+        # Llamar con _mutex tomado. Sesión + perfil, pesados por segundos.
+        if self._voice is None or self._ref is None or SPEAKER_MEMORY != "on":
+            return None
+        profile = min(self._voice.seconds, SPEAKER_PROFILE_WEIGHT_S)
+        mixed = self._voice.vector() * profile + self._ref * _seconds(self._ref_audio)
+        return mixed / float(np.linalg.norm(mixed))
 
     def judge(self, audio: np.ndarray) -> Verdict:
         """¿Es la misma voz que la referencia? Sin referencia o con una frase
@@ -163,18 +295,27 @@ class SpeakerLock:
         seconds = len(audio) / SAMPLE_RATE
         if seconds < SPEAKER_MIN_AUDIO_S:
             return Verdict(True, None, f"frase corta ({seconds:.1f}s), no comparo")
-        ref = self._reference()
+        ref, blend = self._reference()
         if ref is None:
             return Verdict(True, None, "sin referencia todavía")
-        similarity = float(ref @ self._embedder.embed(audio))
+        emb = self._embedder.embed(audio)
+        similarity = float(ref @ emb)
         if similarity >= SPEAKER_MIN_SIMILARITY:
             return Verdict(True, similarity, "misma voz")
+        if blend is not None:
+            with_profile = float(blend @ emb)
+            if with_profile >= SPEAKER_MIN_SIMILARITY:
+                return Verdict(True, with_profile,
+                               f"misma voz por el perfil guardado (sólo sesión {similarity:.2f})")
         return Verdict(False, similarity, "otra voz")
 
-    def follow(self, audio: np.ndarray) -> None:
+    def follow(self, audio: np.ndarray, similarity: float | None = None,
+               trusted: bool = False) -> None:
         """Frase aceptada de quien me llamó: suma a la referencia. Se queda
         siempre con la frase del wake (la más confiable) y las más nuevas
-        hasta SPEAKER_REF_MAX_S."""
+        hasta SPEAKER_REF_MAX_S. Para APRENDER (memoria) sólo cuenta si se
+        verificó con similitud alta (>= SPEAKER_LEARN_MIN_SIM) o es la frase
+        misma del wake (`trusted`)."""
         if not self.enabled or len(audio) / SAMPLE_RATE < SPEAKER_MIN_AUDIO_S:
             return
         with self._mutex:
@@ -185,7 +326,13 @@ class SpeakerLock:
                    and sum(len(a) for a in self._ref_audio) > max_samples):
                 del self._ref_audio[1]
             self._ref = None
-            total = sum(len(a) for a in self._ref_audio) / SAMPLE_RATE
+            total = _seconds(self._ref_audio)
+            if trusted or (similarity is not None and similarity >= SPEAKER_LEARN_MIN_SIM):
+                self._learn_audio.append(audio)
+                max_learn = int(SPEAKER_SESSION_MAX_S * SAMPLE_RATE)
+                while (len(self._learn_audio) > 1
+                       and sum(len(a) for a in self._learn_audio) > max_learn):
+                    del self._learn_audio[1]
         if first:
             ok("SPK", f"referencia de voz fijada con esta frase ({total:.1f}s)")
         else:
@@ -213,6 +360,13 @@ def main() -> None:
         python speaker_id.py              # mic
         python speaker_id.py a.wav b.wav  # compara archivos (16 kHz mono)
 
+    Memoria de voces (speaker_memory.py; no necesita el mic):
+
+        python speaker_id.py --voices             # qué aprendió y cómo decidió
+        python speaker_id.py --rename voz_3 ivan  # ponerle nombre a una voz
+        python speaker_id.py --forget voz_3       # borrar una voz
+        python speaker_id.py --forget             # borrar TODO (perfiles + historial)
+
     La PRIMERA frase que cierre el VAD es la referencia: decí «oye rai» como
     al despertarlo. Después, para cada frase imprime la similitud con la
     referencia. Hablá vos varias veces (y bajito) y que hable otra persona:
@@ -220,6 +374,23 @@ def main() -> None:
     vacío no hace falta: Ctrl+C termina e imprime el resumen.
     """
     import sys
+
+    args = sys.argv[1:]
+    if args and args[0] in ("--voices", "--forget", "--rename"):
+        memory = VoiceMemory()
+        if args[0] == "--voices":
+            memory.print_summary()
+        elif args[0] == "--rename":
+            if len(args) != 3:
+                sys.exit("uso: python speaker_id.py --rename voz_N nombre")
+            print("ok" if memory.rename(args[1], args[2]) else f"no existe {args[1]}")
+        elif len(args) == 2:
+            print(f"borradas: {memory.forget(args[1])}")
+        else:
+            answer = input(f"¿Borrar TODAS las voces e historial de {memory.dir}? [s/N] ")
+            if answer.strip().lower() in ("s", "si", "sí", "y", "yes"):
+                print(f"borradas {memory.forget()} voces y el historial")
+        return
 
     embedder = load_embedder()
     if embedder is None:

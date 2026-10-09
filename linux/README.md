@@ -169,6 +169,51 @@ Con esto activo se puede **bajar el umbral de nivel** (`NEAR_RMS_THRESHOLD`)
 para que no te corte cuando hablás bajo: las voces de fondo que pasen el nivel
 las frena la huella.
 
+### Memoria de voces (aprende sola, sin enrolamiento)
+
+Cada conversación (de «oye rai» a dormirse) es de una sola persona: la
+verificación descarta las demás voces. Al dormirse, el robot aprende la huella
+de esa sesión y la guarda en la Pi ([`speaker_memory.py`](speaker_memory.py)):
+
+- Se parece a una voz guardada (sim ≥ `SPEAKER_MERGE_SIM`, 0.6): refuerza ese
+  perfil. `SPK ✓ aprendí: sesión de 12s = voz_3 sim=0.91`
+- No se parece a ninguna (< `SPEAKER_NEW_SIM`, 0.3): voz nueva `voz_N`.
+- En el medio: duda, queda pendiente. Si se juntan 3 sesiones en duda
+  parecidas entre sí, es alguien de voz parecida a otra persona conocida y se
+  crea su voz.
+- Sólo aprende de sesiones con ≥ 6 s de voz bien verificada (la frase del wake
+  y las aceptadas con sim ≥ 0.5).
+
+Al despertar, si el «oye rai» coincide con una voz guardada
+(`SPK ✓ te reconozco: voz_3`), la conversación arranca con su perfil y no
+sólo con ~1 s de audio: la primera orden ya se compara contra una huella
+buena. El perfil sólo suma aceptaciones: una frase pasa si se parece a la
+sesión o a la sesión + perfil.
+
+Se guarda en `data/speakers/<MIC_MODE>_<modelo>/` (fuera de git): huellas de
+192 números por voz y por sesión, nunca audio (unos KB por persona). Mic o
+modelo distinto = memoria aparte (no son comparables). Voces vistas una sola
+vez y no vueltas a ver en 30 días se borran solas.
+
+```bash
+python speaker_id.py --voices             # voces, pares parecidos, últimas decisiones
+python speaker_id.py --rename voz_3 ivan  # ponerle nombre
+python speaker_id.py --forget voz_3       # borrar una
+python speaker_id.py --forget             # borrar todo
+```
+
+¿Está aprendiendo bien? En `--voices`: una persona tendría que ser una sola
+voz (si dos voces tuyas aparecen como par parecido, sim > 0.3, se partió), y
+los «al despertar: voz_X» tendrían que coincidir con la voz final de cada
+sesión (si no, avisa con `SPK ! al despertar la reconocí como...`).
+`SPEAKER_MEMORY=observe` aprende y loguea pero no usa los perfiles para
+decidir; `off` la apaga.
+
+Simulación en LibriSpeech (9 personas, 60 conversaciones con voces ajenas
+intercaladas): 9 voces aprendidas, ninguna mezcla dos personas, y desde la
+segunda sesión de cada uno el «oye rai» se reconoce en 49 de 51 wakes. Con el
+mic real, en español y con ruido, a medir.
+
 ## 5. Configure the `.env`
 
 Create `linux/.env` (it's already gitignored; see `linux/.env.example`):
@@ -532,6 +577,37 @@ All knobs live in [`linux/config.py`](config.py): `BACKEND`, `MODEL_SIZE`,
 (`RESPEAKER_*`, `DOA_*`) y los de mientras habla (`SPEAK_*`). Los más
 usados se pueden pisar desde `linux/.env` — ver `.env.example`. Para el resto,
 ver el root README.
+
+## Log persistente (para analizar y ajustar el `.env`)
+
+Además de la consola, `main.py` escribe TODO en `logs/stt-AAAA-MM-DD.jsonl`
+(en la raíz del repo, fuera de git; [`log.py`](log.py)). Sobrevive reinicios
+del servicio y de la Pi, un objeto JSON por línea, nunca audio:
+
+- Cada línea de consola (`k`: ok/drop/info/warn/err/dim), con los números de
+  los descartes como campos.
+- Eventos estructurados (`k: "ev"`):
+  - `config`: al arrancar, todos los parámetros de config.py, commit de git, voces conocidas.
+  - `utt`: cada frase que cierra el VAD (aceptada o no, motivo, nivel p50/p90/máx, umbrales, ruido).
+  - `weak`: voz que no llegó a abrir (rms máx vs umbral de apertura).
+  - `stt`: destino final de cada frase (`enviada`, `otra_voz`, `dormido`, `vacia`, `eco_prompt`,
+    `vieja`, `fuera_de_foco`, `nivel_atencion`, ...) con texto, latencia y confianza de
+    Groq, similitud de voz y voz reconocida.
+  - `hb`: el heartbeat (ruido, umbrales vivos, contadores).
+  - `wake`: cada «oye rai» del spotter, aceptado o no, con su nivel.
+  - `spk_recognize` / `spk_learn`: memoria de voces.
+
+Resumen con números y pistas de qué tocar:
+
+```bash
+python log_report.py              # últimos 7 días
+python log_report.py --days 1
+python log_report.py --run last   # sólo desde el último arranque
+```
+
+Rotación: un archivo por día, se borran los de más de `LOG_KEEP_DAYS` (60) y,
+si el total pasa `LOG_MAX_MB` (500), los más viejos. Con el robot quieto son
+~7 MB/día. `LOG_DIR` cambia la carpeta; `LOG_PERSIST=0` lo apaga.
 
 ## Logs y diagnóstico
 

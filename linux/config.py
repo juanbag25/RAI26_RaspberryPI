@@ -401,6 +401,45 @@ SPEAKER_MIN_AUDIO_S = _env_float("SPEAKER_MIN_AUDIO_S", 0.7)
 # Tope de audio de la referencia (el «oye rai» + las últimas frases aceptadas).
 SPEAKER_REF_MAX_S = _env_float("SPEAKER_REF_MAX_S", 8.0)
 
+# --- Memoria de voces (speaker_memory.py) ---------------------------------------
+# Sin enrolamiento: cada conversación (de «oye rai» a dormirse) es de una sola
+# persona, así que al cerrarla se aprende su huella y queda guardada en la Pi.
+# Al despertar, si el «oye rai» es de una voz conocida, la referencia arranca
+# con su perfil (no con ~1 s de audio).
+#   "on":      aprende y usa los perfiles al despertar.
+#   "observe": aprende y loguea a quién reconoce, pero no lo usa para decidir.
+#   "off":     nada (como antes).
+# Borrar todo: `python speaker_id.py --forget`. Ver qué aprendió: `--voices`.
+SPEAKER_MEMORY = _env_str("SPEAKER_MEMORY", "on").lower()
+# Dónde se guarda (una subcarpeta por MIC_MODE y modelo: huellas de mics o
+# modelos distintos no son comparables).
+SPEAKER_DB_DIR = _env_str("SPEAKER_DB_DIR", "") or os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "data", "speakers")
+# Reconocer al despertar: el «oye rai» (~1 s, huella ruidosa) contra los
+# perfiles. Alto a propósito: reconocer mal suma un perfil ajeno.
+SPEAKER_RECOGNIZE_SIM = _env_float("SPEAKER_RECOGNIZE_SIM", 0.55)
+# Al cerrar una sesión, contra las voces guardadas: >= MERGE es esa persona
+# (refuerza su perfil); < NEW con todas es alguien nuevo; en el medio, duda
+# y no se aprende (mejor no aprender que mezclar dos personas).
+SPEAKER_MERGE_SIM = _env_float("SPEAKER_MERGE_SIM", 0.6)
+SPEAKER_NEW_SIM = _env_float("SPEAKER_NEW_SIM", 0.3)
+# Sesiones en duda parecidas entre sí (>= MERGE) que hacen falta para crear
+# la voz de alguien parecido a una persona ya conocida.
+SPEAKER_NEW_CONFIRM = int(_env_float("SPEAKER_NEW_CONFIRM", 3))
+# Para aprender, una sesión tiene que juntar al menos esto de voz verificada.
+SPEAKER_LEARN_MIN_S = _env_float("SPEAKER_LEARN_MIN_S", 6.0)
+# Sólo se aprende de frases aceptadas con esta similitud o más (además de la
+# del wake): las que pasaron raspando pueden traer otra voz mezclada.
+SPEAKER_LEARN_MIN_SIM = _env_float("SPEAKER_LEARN_MIN_SIM", 0.5)
+# Tope de audio por sesión para aprender (lo más largo, más lento en la Pi).
+SPEAKER_SESSION_MAX_S = _env_float("SPEAKER_SESSION_MAX_S", 30.0)
+# Cuánto pesa un perfil guardado (en segundos de voz equivalentes) al
+# mezclarlo con la sesión o con una sesión nueva: con tope sigue adaptándose.
+SPEAKER_PROFILE_WEIGHT_S = _env_float("SPEAKER_PROFILE_WEIGHT_S", 60.0)
+# Voces vistas en UNA sola sesión y no vueltas a ver en estos días se borran.
+# 0 = nunca.
+SPEAKER_FORGET_DAYS = _env_float("SPEAKER_FORGET_DAYS", 30)
+
 # --- Mientras el robot habla ----------------------------------------------------
 # "mute": se descarta todo el audio (como siempre).
 # "keyword": se sigue descartando todo, salvo una ORDEN DE CORTE
