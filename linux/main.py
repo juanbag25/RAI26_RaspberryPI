@@ -46,7 +46,8 @@ from config import (
     SPEAK_BARGE_RATIO,
     SPEAK_LISTEN_MODE,
     SPEAK_STOP_PHRASES,
-    SPEAKER_MIN_SIMILARITY,
+    SPEAKER_MIN_SIMILARITY_KNOWN,
+    SPEAKER_MIN_SIMILARITY_NEW,
     STT_PROMPT,
     WAKE_ACK_DECIDE_MS,
     WAKE_DOA_WINDOW_S,
@@ -346,6 +347,7 @@ def transcribe_worker(
             verdict, spk_s = verdict.result()
             rec.update(spk_s=round(spk_s, 3), spk_wait_s=round(time.monotonic() - t_wait, 3))
             rec.update(spk_sim=verdict.similarity, spk_ok=verdict.accepted,
+                       spk_th=None if verdict.threshold is None else round(verdict.threshold, 3),
                        spk_why=verdict.why, spk_ref_s=round(speaker.ref_seconds(), 1),
                        voice=speaker.voice_label())
         if (text and MIX_TRIM_ENABLED and verdict is not None and not verdict.accepted
@@ -811,7 +813,8 @@ def main() -> None:
     speaker = SpeakerLock(embedder, load_memory(embedder))
     if speaker.enabled:
         ok("SPK", "verificación de hablante activa: despierto, sólo escucho la voz "
-           f"que me llamó (sim>={SPEAKER_MIN_SIMILARITY:g})")
+           f"que me llamó (sim>={SPEAKER_MIN_SIMILARITY_NEW:g} voz nueva … "
+           f"{SPEAKER_MIN_SIMILARITY_KNOWN:g} voz conocida)")
 
     wake = WakeWord(level_ratio=(ATTENTION_LEVEL_RATIO_ARRAY if spatial.enabled
                                  else ATTENTION_LEVEL_RATIO))

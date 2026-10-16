@@ -399,9 +399,19 @@ SPEAKER_VERIFY_ENABLED = _env_bool("SPEAKER_VERIFY_ENABLED", True)
 # cuánto audio haya en la referencia.
 SPEAKER_MODEL_NAME = _env_str("SPEAKER_MODEL_NAME", "nemo_en_titanet_small.onnx")
 # Similitud coseno mínima con la referencia para aceptar la frase (0-1).
-# Calibrar con `python speaker_id.py`. Bajala (0.25) si te ignora a vos;
-# subila (0.45) si entran otras voces.
-SPEAKER_MIN_SIMILARITY = _env_float("SPEAKER_MIN_SIMILARITY", 0.35)
+# Es DINÁMICA: depende de cuánto conoce el robot la voz de quien lo llamó
+# (segundos de voz del perfil reconocido en la memoria de voces). Una voz
+# nueva o que apenas está conociendo (huella ruidosa, sólo el «oye rai»)
+# necesita SPEAKER_MIN_SIMILARITY_NEW; una voz con SPEAKER_KNOWN_S o más de
+# perfil, SPEAKER_MIN_SIMILARITY_KNOWN; en el medio, lineal. Sólo cuenta el
+# perfil con SPEAKER_MEMORY=on (observe/off: siempre el de voz nueva).
+# Calibrar con `python speaker_id.py`.
+SPEAKER_MIN_SIMILARITY_NEW = _env_float("SPEAKER_MIN_SIMILARITY_NEW", 0.15)
+SPEAKER_MIN_SIMILARITY_KNOWN = _env_float("SPEAKER_MIN_SIMILARITY_KNOWN", 0.30)
+SPEAKER_KNOWN_S = _env_float("SPEAKER_KNOWN_S", 120.0)
+if os.getenv("SPEAKER_MIN_SIMILARITY", "").strip():
+    warn("CONFIG", "SPEAKER_MIN_SIMILARITY ya no se usa: el umbral es dinámico "
+         "(SPEAKER_MIN_SIMILARITY_NEW / _KNOWN, SPEAKER_KNOWN_S)")
 # Con menos audio que esto el «oye rai» no sirve de referencia: la toma la
 # primera frase aceptada (la decide el nivel, como antes).
 SPEAKER_MIN_REF_S = _env_float("SPEAKER_MIN_REF_S", 0.8)

@@ -101,7 +101,8 @@ def main() -> None:
         prev = c
     if cfg:
         keys = ("NEAR_RMS_THRESHOLD", "RMS_THRESHOLD", "NEAR_SNR_RATIO", "NOISE_FLOOR_MAX",
-                "ATTENTION_LEVEL_RATIO", "SPEAKER_MIN_SIMILARITY", "SPEAKER_MEMORY",
+                "ATTENTION_LEVEL_RATIO", "SPEAKER_MIN_SIMILARITY_NEW",
+                "SPEAKER_MIN_SIMILARITY_KNOWN", "SPEAKER_KNOWN_S", "SPEAKER_MEMORY",
                 "SILERO_THRESHOLD", "WAKE_WINDOW_S")
         print("  config actual: " + ", ".join(f"{k}={cfg.get(k)}" for k in keys if k in cfg))
     print()
@@ -152,15 +153,23 @@ def main() -> None:
 
     # --- voz -------------------------------------------------------------------
     judged = [s for s in stt if s.get("spk_sim") is not None]
-    th = cfg.get("SPEAKER_MIN_SIMILARITY", 0.35)
+    # Umbral dinámico: el de cada frase (spk_th); logs viejos, el fijo de entonces.
+    th_fixed = cfg.get("SPEAKER_MIN_SIMILARITY", 0.35)
+
+    def th_of(s: dict) -> float:
+        return s.get("spk_th") if s.get("spk_th") is not None else th_fixed
+
     acc = [s["spk_sim"] for s in judged if s.get("spk_ok")]
     rej = [s["spk_sim"] for s in judged if not s.get("spk_ok")]
-    near_rej = [s for s in judged if not s.get("spk_ok") and s["spk_sim"] >= th - 0.1]
-    print(f"== Voz (speaker_id, umbral {th})")
+    near_rej = [s for s in judged if not s.get("spk_ok") and s["spk_sim"] >= th_of(s) - 0.1]
+    ths = [s.get("spk_th") for s in judged if s.get("spk_th") is not None]
+    print("== Voz (speaker_id, umbral " + (f"dinámico {pct(ths, 5, 50, 95)}" if ths
+                                           else str(th_fixed)) + ")")
     print(f"  aceptadas:  {pct(acc, 5, 50)}")
     print(f"  rechazadas: {pct(rej, 50, 95)}")
     print(f"  rechazos a <0.1 del umbral: {len(near_rej)}"
-          + "".join(f"\n    sim={s['spk_sim']:.2f} «{s.get('text', '')}»" for s in near_rej[-5:]))
+          + "".join(f"\n    sim={s['spk_sim']:.2f} (umbral {th_of(s):.2f}) "
+                  f"[{s.get('voice') or 'voz nueva'}] «{s.get('text', '')}»" for s in near_rej[-5:]))
     rec = events(records, "spk_recognize")
     learned = Counter(e.get("decision") for e in events(records, "spk_learn"))
     print(f"  al despertar: {sum(1 for e in rec if e.get('voice'))} reconocidas de {len(rec)}; "
@@ -203,7 +212,7 @@ def main() -> None:
                      "apertura (RMS_THRESHOLD / ruido x SNR) puede estar alto.")
     if judged and len(near_rej) >= max(2, 0.2 * len(rej)):
         hints.append("Varios rechazos de voz cerca del umbral: mirar los textos de arriba; si eran "
-                     "tuyos, bajar SPEAKER_MIN_SIMILARITY 0.05.")
+                     "tuyos, bajar SPEAKER_MIN_SIMILARITY_NEW o _KNOWN (según la voz) 0.05.")
     if outcomes.get("vacia", 0) > 0.2 * max(1, sum(outcomes.values())):
         hints.append("Más del 20 % de las frases vuelven vacías de Groq: suele ser ruido que pasó el "
                      "VAD (subir SILERO_THRESHOLD o el umbral de nivel).")

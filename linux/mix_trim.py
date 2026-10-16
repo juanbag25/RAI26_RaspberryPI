@@ -62,7 +62,6 @@ from config import (
     MIX_TRIM_WIN_S,
     SAMPLE_RATE,
     SPEAKER_MIN_AUDIO_S,
-    SPEAKER_MIN_SIMILARITY,
 )
 from doa import DoaFocus, DoaReading
 from log import cut, drop_block
@@ -197,9 +196,10 @@ class MixTrimmer:
             joined = np.concatenate(pieces)
             if has_voice and len(joined) >= SPEAKER_MIN_AUDIO_S * SAMPLE_RATE:
                 final_sim = self._speaker.similarity(joined)
-                if final_sim is not None and final_sim < SPEAKER_MIN_SIMILARITY:
+                threshold = self._speaker.min_similarity()
+                if final_sim is not None and final_sim < threshold:
                     reason = (f"lo que quedó tampoco se parece a quien llamó "
-                              f"(sim {final_sim:.2f} < {SPEAKER_MIN_SIMILARITY:g})")
+                              f"(sim {final_sim:.2f} < {threshold:.2f})")
             if reason is None:
                 gap = np.zeros(int(_GAP_S * SAMPLE_RATE), dtype=audio.dtype)
                 parts: list[np.ndarray] = []
@@ -214,7 +214,7 @@ class MixTrimmer:
                        compute_s=round(elapsed, 3))
 
         lines = self._render(segs, doa is not None, has_voice, ctx, removed,
-                             final_sim, full_text)
+                             final_sim, full_text, self._speaker.min_similarity())
         if trimmed is not None:
             cut("MIX", f"frase mezclada ({why}): conservo {kept_samples / SAMPLE_RATE:.1f} de "
                 f"{len(audio) / SAMPLE_RATE:.1f} s  [cómputo {elapsed:.2f} s]", lines)
@@ -327,7 +327,8 @@ class MixTrimmer:
     @staticmethod
     def _render(segs: list[_Segment], has_doa: bool, has_voice: bool,
                 ctx: MixContext | None, removed: list[_Segment],
-                final_sim: float | None, full_text: str | None) -> list[str]:
+                final_sim: float | None, full_text: str | None,
+                threshold: float) -> list[str]:
         lines = []
         if has_voice:
             row = "".join(_QUIET if s.quiet else s.voice for s in segs)
@@ -365,7 +366,7 @@ class MixTrimmer:
             lines.append("saqué " + " · ".join(described))
         if final_sim is not None:
             lines.append(f"lo que quedó vs quien llamó: sim {final_sim:.2f} "
-                         f"(mínimo {SPEAKER_MIN_SIMILARITY:g})")
+                         f"(mínimo {threshold:.2f})")
         if full_text:
             lines.append(f"la frase entera decía: «{full_text}»")
         return lines

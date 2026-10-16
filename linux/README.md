@@ -147,8 +147,13 @@ curl -L -o models/nemo_en_titanet_small.onnx \
 sherpa-onnx, `main.py` avisa y sigue sin verificación.
 
 Cómo decide: la frase del «oye rai» es la referencia; cada frase siguiente se
-compara (similitud coseno) y por debajo de `SPEAKER_MIN_SIMILARITY` (0.35) se
-descarta (`SPK ✗ DESCARTADO otra voz sim=...`). Las frases aceptadas se suman
+compara (similitud coseno) y por debajo del umbral se descarta
+(`SPK ✗ DESCARTADO otra voz sim=... minimo=...`). El umbral es **dinámico**:
+depende de cuánto conoce la voz de quien lo llamó (segundos de voz del perfil
+en la memoria de voces, ver abajo). Voz nueva o que apenas conoce:
+`SPEAKER_MIN_SIMILARITY_NEW` (0.15); con `SPEAKER_KNOWN_S` (120 s) o más de
+perfil: `SPEAKER_MIN_SIMILARITY_KNOWN` (0.30); en el medio, lineal (60 s →
+0.225). Con `SPEAKER_MEMORY=observe|off` siempre es el de voz nueva. Las frases aceptadas se suman
 a la referencia (hasta 8 s), así que mejora con la charla. Frases de menos de
 0.7 s ("sí", "no") no se comparan. Al dormirse se olvida.
 
@@ -160,8 +165,9 @@ python speaker_id.py
 
 La primera frase es la referencia (decí «oye rai»). Después hablá vos varias
 veces, también bajito y de más lejos, y que hable otra persona. Imprime la
-similitud de cada frase. `SPEAKER_MIN_SIMILARITY` va entre tu mínimo y el
-máximo de la otra persona. En LibriSpeech (audio limpio, 10 personas) con
+similitud de cada frase contra una referencia nueva (umbral
+`SPEAKER_MIN_SIMILARITY_NEW`), que debería quedar entre tu mínimo y el máximo
+de la otra persona. En LibriSpeech (audio limpio, 10 personas) con
 0.35 se aceptaron 44 de 45 frases propias y 2 de 45 ajenas. Con el mic real y
 ruido del robot, a medir.
 

@@ -13,7 +13,10 @@ Cómo funciona:
 2. Mientras dure la ventana, cada frase cerrada por el VAD se compara contra
    la referencia (`judge()`, en el hilo de STT, en paralelo con Groq): un
    embedding de voz (un vector de 192 números) por frase y similitud coseno.
-   Por debajo de SPEAKER_MIN_SIMILARITY se descarta: es otra voz.
+   Por debajo del umbral se descarta: es otra voz. El umbral es dinámico
+   (`min_similarity()`): más bajo para una voz que apenas conoce
+   (SPEAKER_MIN_SIMILARITY_NEW, huella ruidosa) y más alto para una que
+   conoce bien (SPEAKER_MIN_SIMILARITY_KNOWN, perfil de SPEAKER_KNOWN_S).
 3. Cada frase aceptada se suma a la referencia (`follow()`): el «oye rai»
    solo es ~1 s de voz y la huella sale ruidosa; con más audio mejora.
 4. Al dormirse se olvida (`clear()`). Otro «oye rai» que pase el filtro de
@@ -55,7 +58,9 @@ from config import (
     SPEAKER_MEMORY,
     SPEAKER_MIN_AUDIO_S,
     SPEAKER_MIN_REF_S,
-    SPEAKER_MIN_SIMILARITY,
+    SPEAKER_KNOWN_S,
+    SPEAKER_MIN_SIMILARITY_KNOWN,
+    SPEAKER_MIN_SIMILARITY_NEW,
     SPEAKER_MODEL_PATH,
     SPEAKER_PROFILE_WEIGHT_S,
     SPEAKER_RECOGNIZE_SIM,
@@ -129,10 +134,22 @@ class Verdict:
     accepted: bool
     similarity: float | None   # None = no se comparó (sin referencia, frase corta)
     why: str
+    threshold: float | None = None   # umbral con que se juzgó (dinámico)
 
 
 def _seconds(chunks: list[np.ndarray]) -> float:
     return sum(len(a) for a in chunks) / SAMPLE_RATE
+
+
+def threshold_for(voice: Voice | None) -> float:
+    """Similitud mínima según cuánto se conoce la voz: SPEAKER_MIN_SIMILARITY_NEW
+    sin perfil, SPEAKER_MIN_SIMILARITY_KNOWN con SPEAKER_KNOWN_S o más de voz
+    en el perfil, lineal en el medio."""
+    if voice is None or SPEAKER_MEMORY != "on" or SPEAKER_KNOWN_S <= 0:
+        return SPEAKER_MIN_SIMILARITY_NEW
+    known = min(voice.seconds / SPEAKER_KNOWN_S, 1.0)
+    return SPEAKER_MIN_SIMILARITY_NEW + known * (
+        SPEAKER_MIN_SIMILARITY_KNOWN - SPEAKER_MIN_SIMILARITY_NEW)
 
 
 class SpeakerLock:
@@ -237,6 +254,12 @@ class SpeakerLock:
     def known_voices(self) -> list[Voice]:
         return self._memory.voices() if self._memory is not None else []
 
+    def min_similarity(self) -> float:
+        """Umbral de esta sesión (ver threshold_for). Antes de reconocer la
+        voz en la memoria, el de voz nueva."""
+        with self._mutex:
+            return threshold_for(self._voice)
+
     def voice_label(self) -> str | None:
         """Voz conocida de esta sesión (None = desconocida / sin memoria)."""
         with self._mutex:
@@ -273,7 +296,8 @@ class SpeakerLock:
                 use = ("la uso de referencia" if SPEAKER_MEMORY == "on"
                        else "modo observe: no la uso")
                 ok("SPK", f"te reconozco: {voice.label} sim={sim:.2f} "
-                   f"({voice.sessions} sesiones); {use}")
+                   f"({voice.sessions} sesiones, {voice.seconds:.0f}s de voz); {use}; "
+                   f"umbral {threshold_for(voice):.2f}")
             elif self._memory.voices():
                 dim("SPK", f"voz desconocida (la más parecida sim={sim:.2f} < "
                     f"{SPEAKER_RECOGNIZE_SIM:g})")
@@ -299,15 +323,17 @@ class SpeakerLock:
         if ref is None:
             return Verdict(True, None, "sin referencia todavía")
         emb = self._embedder.embed(audio)
+        threshold = self.min_similarity()
         similarity = float(ref @ emb)
-        if similarity >= SPEAKER_MIN_SIMILARITY:
-            return Verdict(True, similarity, "misma voz")
+        if similarity >= threshold:
+            return Verdict(True, similarity, "misma voz", threshold)
         if blend is not None:
             with_profile = float(blend @ emb)
-            if with_profile >= SPEAKER_MIN_SIMILARITY:
+            if with_profile >= threshold:
                 return Verdict(True, with_profile,
-                               f"misma voz por el perfil guardado (sólo sesión {similarity:.2f})")
-        return Verdict(False, similarity, "otra voz")
+                               f"misma voz por el perfil guardado (sólo sesión {similarity:.2f})",
+                               threshold)
+        return Verdict(False, similarity, "otra voz", threshold)
 
     def similarity(self, audio: np.ndarray) -> float | None:
         """Similitud de un tramo suelto con quien llamó (la mejor entre la
@@ -358,18 +384,18 @@ class SpeakerLock:
         """Loguea el veredicto de judge(). True = la frase sigue."""
         if not verdict.accepted:
             drop("SPK", verdict.why, sim=verdict.similarity,
-                 minimo=SPEAKER_MIN_SIMILARITY, nivel=level)
+                 minimo=round(verdict.threshold, 2), nivel=level)
             return False
         if verdict.similarity is not None:
             ok("SPK", f"{verdict.why} sim={verdict.similarity:.2f} "
-               f"(mínimo {SPEAKER_MIN_SIMILARITY:g})")
+               f"(mínimo {verdict.threshold:.2f})")
         else:
             dim("SPK", verdict.why)
         return True
 
 
 def main() -> None:
-    """Calibración de SPEAKER_MIN_SIMILARITY en vivo, con el mismo camino de
+    """Calibración del umbral de similitud en vivo, con el mismo camino de
     audio y VAD que main.py (sin wake word ni Groq):
 
         python speaker_id.py              # mic
@@ -385,7 +411,7 @@ def main() -> None:
     La PRIMERA frase que cierre el VAD es la referencia: decí «oye rai» como
     al despertarlo. Después, para cada frase imprime la similitud con la
     referencia. Hablá vos varias veces (y bajito) y que hable otra persona:
-    SPEAKER_MIN_SIMILARITY va entre el mínimo tuyo y el máximo ajeno. Enter
+    el umbral va entre el mínimo tuyo y el máximo ajeno. Enter
     vacío no hace falta: Ctrl+C termina e imprime el resumen.
     """
     import sys
@@ -431,8 +457,10 @@ def main() -> None:
     capture = LinuxAudioCapture(device_id=None)
     ref: np.ndarray | None = None
     sims: list[float] = []
-    print(f"\nDecí «oye rai» (referencia). Umbral actual SPEAKER_MIN_SIMILARITY="
-          f"{SPEAKER_MIN_SIMILARITY:g}. Ctrl+C para terminar.\n")
+    print(f"\nDecí «oye rai» (referencia). Umbral: voz nueva "
+          f"{SPEAKER_MIN_SIMILARITY_NEW:g}, conocida {SPEAKER_MIN_SIMILARITY_KNOWN:g} "
+          f"(acá la referencia es nueva: {SPEAKER_MIN_SIMILARITY_NEW:g}). "
+          f"Ctrl+C para terminar.\n")
     try:
         for af in capture.frames():
             closed, audio = vad.process_frame(af.pcm, af.rms, af.t)
@@ -445,7 +473,7 @@ def main() -> None:
                 continue
             sim = float(ref @ embedder.embed(audio))
             sims.append(sim)
-            mark = "PASA " if sim >= SPEAKER_MIN_SIMILARITY else "corta"
+            mark = "PASA " if sim >= SPEAKER_MIN_SIMILARITY_NEW else "corta"
             short = "  (corta: en main.py no se compara)" if seconds < SPEAKER_MIN_AUDIO_S else ""
             print(f"{mark} sim={sim:.3f}  {seconds:.1f}s  nivel={vad.last_level:.4f}{short}")
     except KeyboardInterrupt:
