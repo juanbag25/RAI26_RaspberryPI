@@ -59,7 +59,9 @@ from config import (
 )
 from ctrl_server import SpeakMute, start_in_background
 from doa import DoaFocus, DoaReading, in_any_sector, parse_sectors, to_robot_frame
-from log import DEBUG, dbg, dim, drop, err, event, fmt, info, ok, persist, warn
+from changelog import CHANGES
+from log import (DEBUG, dbg, dim, drop, err, event, fmt, info, ok, persist,
+                 previous_run_end, warn)
 from mix_trim import MixContext, MixTrimmer, doa_by_segment
 from respeaker import ReSpeaker
 from speaker_id import SpeakerLock, load_embedder, load_memory
@@ -171,6 +173,13 @@ class OrchestratorLink:
         self._lock = threading.Lock()
         self._current = hosts[0]
         self._down_until = 0.0
+        # Se llama con "texto"/"ack" cuando llegó algo que debería hacer
+        # hablar al robot (SpeakMute.expect_reply: latencia en el log).
+        self.on_reply_expected = None
+
+    def reply_expected(self, kind: str) -> None:
+        if self.on_reply_expected is not None:
+            self.on_reply_expected(kind)
 
     def describe(self) -> str:
         return ", ".join(f"{h}:{self.port}" for h in self.hosts)
@@ -208,7 +217,10 @@ class OrchestratorLink:
         payload = {"text": text, "stt_confidence": stt_confidence}
         if pi_latency_s is not None:
             payload["pi_latency_s"] = round(pi_latency_s, 3)
-        return self.send(json.dumps(payload))
+        if self.send(json.dumps(payload)):
+            self.reply_expected("texto")
+            return True
+        return False
 
 
 def config_snapshot() -> dict:
@@ -228,6 +240,15 @@ def config_snapshot() -> dict:
         elif isinstance(value, dict):
             snap[name] = {str(k): v for k, v in value.items()}
     return snap
+
+
+def _boot_uptime_s() -> float | None:
+    """Segundos desde que arrancó la Pi (None fuera de Linux)."""
+    try:
+        with open("/proc/uptime") as f:
+            return round(float(f.read().split()[0]), 1)
+    except (OSError, ValueError, IndexError):
+        return None
 
 
 def _git_version() -> str:
@@ -339,7 +360,8 @@ def transcribe_worker(
         text, stt_confidence = transcriber.transcribe(audio)
         elapsed = time.monotonic() - t0
         counters.transcribed += 1
-        rec.update(text=text, stt_s=round(elapsed, 3), conf=stt_confidence)
+        rec.update(text=text, stt_s=round(elapsed, 3), conf=stt_confidence,
+                   **(getattr(transcriber, "last_metrics", None) or {}))
         if verdict is not None:
             # spk_wait_s: lo que la huella de voz atrasó la frase (corre en
             # paralelo con Groq; si es > 0, la Pi es el cuello de botella).
@@ -370,7 +392,8 @@ def transcribe_worker(
             text, stt_confidence = transcriber.transcribe(audio)
             elapsed = time.monotonic() - t0
             counters.transcribed += 1
-            rec.update(text=text, stt_s=round(elapsed, 3), conf=stt_confidence)
+            rec.update(text=text, stt_s=round(elapsed, 3), conf=stt_confidence,
+                       **(getattr(transcriber, "last_metrics", None) or {}))
         if not text:
             counters.empty += 1
             drop("STT", "Groq no devolvió texto (error arriba, o audio inaudible)",
@@ -536,7 +559,11 @@ class OrchestratorEvents:
                 self._post(name)
 
     def _post(self, name: str) -> None:
-        self._orchestrator.send(ORCH_EVENT_PREFIX + name, quiet=True)
+        t0 = time.monotonic()
+        sent = self._orchestrator.send(ORCH_EVENT_PREFIX + name, quiet=True)
+        if sent and name == "awake":
+            self._orchestrator.reply_expected("ack")
+        event("orch_ev", name=name, ok=sent, send_s=round(time.monotonic() - t0, 3))
 
 
 class Spatial:
@@ -762,13 +789,35 @@ def main() -> None:
         ORCHESTRATOR_PORT)
 
     log_dir = persist()
+    prev = previous_run_end()
     info("MAIN", "=== STT Pi arrancando ===")
     if log_dir:
         dim("LOG", f"log persistente en {log_dir} (stt-AAAA-MM-DD.jsonl; ver log_report.py)")
+    boot_uptime_s = _boot_uptime_s()
+    if prev is not None:
+        # Sin `exit`, la corrida anterior murió sin pasar por el finally:
+        # apagón, desenchufe, kill -9 o cuelgue. boot_uptime_s chico = la Pi
+        # también arrancó de cero.
+        clean = prev.get("ev") == "exit"
+        when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(prev.get("t", 0)))
+        if clean:
+            dim("MAIN", f"corrida anterior {prev.get('run')}: cerró bien ({prev.get('reason')}) {when}")
+        else:
+            warn("MAIN", f"corrida anterior {prev.get('run')} terminó SIN cierre; último "
+                 f"registro {when} (apagón, desenchufe, kill -9 o cuelgue)"
+                 + (f"; la Pi arrancó hace {boot_uptime_s:.0f}s" if boot_uptime_s is not None
+                    and boot_uptime_s < 600 else ""))
+        event("prev_run", run=prev.get("run"), last_t=prev.get("t"), clean=clean,
+              reason=prev.get("reason"), last_ev=prev.get("ev"), last_tag=prev.get("tag"),
+              boot_uptime_s=boot_uptime_s)
+    started = time.monotonic()
+    exit_reason = "fin"
 
     # systemctl stop/restart manda SIGTERM: tratarlo como Ctrl+C para que el
     # finally corra (aprende la conversación abierta, apaga los LEDs).
     def _on_sigterm(_signum, _frame):
+        nonlocal exit_reason
+        exit_reason = "sigterm"
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, _on_sigterm)
 
@@ -827,6 +876,7 @@ def main() -> None:
     # El SPEAK_START congela la ventana mientras el robot habla.
     mute = SpeakMute(on_speak_end=wake.refresh, on_speak_start=wake.hold)
     start_in_background(CTRL_PORT, mute)
+    orchestrator.on_reply_expected = mute.expect_reply
     dim("CTRL", f"espero SPEAK_START/SPEAK_END del orquestador en :{CTRL_PORT}")
 
     # Wake por audio: spotter local (Vosk). Si no puede arrancar, el robot
@@ -890,7 +940,7 @@ def main() -> None:
           orchestrator=orchestrator.describe(), vad_engine=vad.engine,
           spotter=spotter is not None, speaker=speaker.enabled,
           voices=[v.label for v in speaker.known_voices()], heartbeat_s=HEARTBEAT_S,
-          max_queue_age_s=MAX_QUEUE_AGE_S)
+          max_queue_age_s=MAX_QUEUE_AGE_S, boot_uptime_s=boot_uptime_s, changes=CHANGES)
 
     if HEARTBEAT_S > 0:
         threading.Thread(
@@ -900,12 +950,18 @@ def main() -> None:
         ).start()
 
     def handle_wake(heard: str, now: float, announce: bool = True,
-                    voice: "np.ndarray | None" = None) -> bool:
+                    voice: "np.ndarray | None" = None,
+                    level: float | None = None) -> bool:
         """El spotter oyó la frase de wake. Despierta (o pasa el foco a quien
         la dijo) y fija la dirección. False si no corresponde atenderla.
         `announce=False`: el «Sí, dime» lo decide el loop (WAKE_ACK_DECIDE_MS).
         `voice`: audio del «oye rai» para la huella de voz; None = no tocar la
-        referencia (orden de corte: el audio trae la voz del robot)."""
+        referencia (orden de corte: el audio trae la voz del robot).
+        `level`: nivel de quien habló, si el VAD no lo sabe. Muteado el VAD no
+        recibe frames y su nivel es 0: sin esto, un «oye rai» de corte nunca
+        pasaba el filtro de traspaso (2026-10-16, ver changelog.py)."""
+        if level is None:
+            level = vad.current_level()
         reading = spatial.reading(now - WAKE_DOA_WINDOW_S, now)
         if spatial.enabled and reading.n >= 2 and reading.blocked >= 0.6:
             drop("WAKE", f"«{heard}» desde un sector de ruido del robot",
@@ -917,7 +973,7 @@ def main() -> None:
             # Traspaso: otra persona (o la misma) vuelve a llamarlo. Tiene que
             # sonar cerca (filtro general) o venir del foco actual: un «rai»
             # de fondo no se roba el robot.
-            level, near = vad.current_level(), vad.near_threshold()
+            near = vad.near_threshold()
             same_place = (spatial.focus.focus is not None
                           and reading.in_focus >= DOA_MIN_IN_FOCUS)
             if level < near and not same_place:
@@ -927,7 +983,7 @@ def main() -> None:
                       level=round(level, 5), near=round(near, 5))
                 return False
         event("wake", heard=heard, accepted=True, was_awake=wake.is_awake(),
-              level=round(vad.current_level(), 5), near=round(vad.near_threshold(), 5),
+              level=round(level, 5), near=round(vad.near_threshold(), 5),
               noise=round(vad.noise_floor, 5), in_speech=vad.in_speech,
               voice_s=None if voice is None else round(len(voice) / 16000.0, 2),
               dir=reading.direction if spatial.enabled else None)
@@ -1004,19 +1060,31 @@ def main() -> None:
                     heard = spotter.take_detection()
                     if heard:
                         loud, peak, robot_level = barge.loud_enough()
+                        rewake = None
                         if spatial.from_speaker(af.t - WAKE_DOA_WINDOW_S, af.t):
+                            outcome = "parlante"
                             drop("CTRL", f"«{heard}» vino del parlante del robot")
                         elif not loud:
+                            outcome = "flojo"
                             drop("CTRL", f"«{heard}» no se destaca sobre la voz del robot",
                                  pico=peak, parlante=robot_level, factor=SPEAK_BARGE_RATIO)
                         else:
+                            outcome = "corte"
                             counters.barge_ins += 1
                             ok("CTRL", f"ORDEN DE CORTE «{heard}» " + fmt(pico=peak, parlante=robot_level))
                             events.send("stop")
+                            mute.note_stop()
                             # «oye rai» en vez de «para rai»: además re-despierta
-                            # (el orquestador contesta «Sí, dime»).
-                            if not spotter.is_stop(heard) and handle_wake(heard, af.t):
-                                counters.wakes += 1
+                            # (el orquestador contesta «Sí, dime»). El nivel es
+                            # el pico que ya pasó loud_enough (el VAD, muteado,
+                            # da 0).
+                            if not spotter.is_stop(heard):
+                                rewake = handle_wake(heard, af.t, level=peak)
+                                if rewake:
+                                    counters.wakes += 1
+                        event("barge", heard=heard, outcome=outcome, peak=round(peak, 5),
+                              robot=round(robot_level, 5), rewake=rewake,
+                              speaking_s=mute.speaking_s())
                 continue
             was_muted = False
             recent_pcm.append(frame)
@@ -1128,8 +1196,16 @@ def main() -> None:
                 audio_queue.put((audio, level, time.monotonic(), wake_prefix, mix))
 
     except KeyboardInterrupt:
+        if exit_reason == "fin":
+            exit_reason = "ctrl_c"
         info("MAIN", "Stopped.")
+    except BaseException as exc:
+        exit_reason = f"error: {type(exc).__name__}: {exc}"
+        raise
     finally:
+        # Marca de cierre limpio: si falta, el próximo arranque avisa (prev_run).
+        event("exit", reason=exit_reason, ran_s=round(time.monotonic() - started, 1),
+              totals=dict(vars(counters)))
         # Aprende la conversación abierta antes de salir (Ctrl+C, systemd).
         speaker.close()
         if array is not None:

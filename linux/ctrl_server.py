@@ -9,6 +9,12 @@ del sistema ([uint32 big-endian][payload UTF-8]), dos mensajes:
 `SpeakMute.is_muted()` se consulta desde el loop de captura de main.py. Si un
 SPEAK_END se pierde (red, crash del orquestador), el mute expira solo a los
 MUTE_TIMEOUT_S segundos para no dejar el robot sordo.
+
+Cada turno del robot (primer SPEAK_START → desmute) deja un evento `speak` en
+el log persistente: cuánto habló, cuántos SPEAK_START trajo, si cerró por
+SPEAK_END o por timeout, cuánto tardó en arrancar desde lo que la Pi le mandó
+(`reply_s`, ver `expect_reply`) y, si hubo orden de corte, cuánto siguió
+hablando después (`after_stop_s`, ver `note_stop`).
 """
 
 from __future__ import annotations
@@ -20,7 +26,7 @@ import time
 from typing import Callable
 
 from config import MUTE_TIMEOUT_S, SPEAK_END_TAIL_S
-from log import err, info, warn
+from log import err, event, info, warn
 
 _MAX_MESSAGE_BYTES = 1024
 
@@ -41,6 +47,63 @@ class SpeakMute:
         # True entre el SPEAK_END y el fin de la cola (SPEAK_END_TAIL_S): el
         # vencimiento del deadline es normal, no un SPEAK_END perdido.
         self._ending = False
+        # Métricas del turno en curso (evento `speak`).
+        self._lock = threading.Lock()
+        self._turn_start: float | None = None
+        self._starts = 0
+        self._stops = 0
+        self._first_stop: float | None = None
+        self._reply_s: float | None = None
+        self._reply_kind: str | None = None
+        self._expect: tuple[str, float] | None = None
+
+    # Una respuesta que tarda más que esto ya no se atribuye al envío.
+    _REPLY_MAX_S = 30.0
+
+    def expect_reply(self, kind: str) -> None:
+        """La Pi le mandó algo al orquestador que debería hacerlo hablar
+        ("texto" = transcript, "ack" = wake/«Sí, dime»): el próximo
+        SPEAK_START mide la latencia de punta a punta vista desde acá."""
+        with self._lock:
+            self._expect = (kind, time.monotonic())
+
+    def note_stop(self) -> None:
+        """Salió una orden de corte mientras el robot hablaba."""
+        with self._lock:
+            self._stops += 1
+            if self._first_stop is None:
+                self._first_stop = time.monotonic()
+
+    def speaking_s(self) -> float | None:
+        """Hace cuánto empezó a hablar el robot (None si no está hablando)."""
+        start = self._turn_start
+        return None if start is None else round(time.monotonic() - start, 2)
+
+    def _turn_begin(self) -> None:
+        now = time.monotonic()
+        with self._lock:
+            self._starts += 1
+            if self._turn_start is not None:
+                return
+            self._turn_start = now
+            if self._expect is not None and now - self._expect[1] <= self._REPLY_MAX_S:
+                self._reply_kind = self._expect[0]
+                self._reply_s = round(now - self._expect[1], 3)
+            self._expect = None
+
+    def _turn_end(self, how: str) -> None:
+        now = time.monotonic()
+        with self._lock:
+            if self._turn_start is None:
+                return
+            event("speak", end=how, dur_s=round(now - self._turn_start, 2),
+                  starts=self._starts, reply=self._reply_kind, reply_s=self._reply_s,
+                  stops=self._stops,
+                  after_stop_s=(None if self._first_stop is None
+                                else round(now - self._first_stop, 2)))
+            self._turn_start = None
+            self._starts = self._stops = 0
+            self._first_stop = self._reply_s = self._reply_kind = None
 
     def is_muted(self) -> bool:
         if not self._muted.is_set():
@@ -49,8 +112,10 @@ class SpeakMute:
             self._muted.clear()
             if self._ending:
                 info("CTRL", "robot terminó: mic activo")
+                self._turn_end("end")
             else:
                 warn("CTRL", "SPEAK_END perdido: desmuteo por timeout")
+                self._turn_end("timeout")
             self._notify_speak_end()
             return False
         return True
@@ -72,12 +137,14 @@ class SpeakMute:
             self._ending = False
             self._deadline = time.monotonic() + self._timeout
             self._muted.set()
+            self._turn_begin()
             info("CTRL", "robot habla: mic MUTEADO")
             self._notify(self._on_speak_start, "on_speak_start")
         elif message == "SPEAK_END":
             if SPEAK_END_TAIL_S <= 0 or not self._muted.is_set():
                 self._muted.clear()
                 info("CTRL", "robot terminó: mic activo")
+                self._turn_end("end")
                 self._notify_speak_end()
                 return
             # Sigue muteado un rato: is_muted() desmutea (y avisa) al vencer.

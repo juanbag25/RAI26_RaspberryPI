@@ -62,9 +62,13 @@ class GroqTranscriber:
             warn("STT", "GROQ_API_KEY no está definida (¿falta linux/.env?): "
                  "toda transcripción va a fallar")
         self._client = Groq()
+        # Métricas de Whisper de la última transcripción (main.py las pone en
+        # el evento `stt` del log, para calibrar STT_MIN_LOGPROB y compañía).
+        self.last_metrics: dict = {}
         dim("STT", f"groq {GROQ_MODEL} ({LANGUAGE})")
 
     def transcribe(self, audio_np: np.ndarray) -> tuple[str, float]:
+        self.last_metrics = {}
         try:
             buf = io.BytesIO()
             with wave.open(buf, "wb") as wav:
@@ -95,7 +99,27 @@ class GroqTranscriber:
             return "", 0.0
         text = self._filter(result)
         stt_confidence = self._confidence(result)
+        self.last_metrics = self._metrics(result, text)
         return text, stt_confidence
+
+    @staticmethod
+    def _metrics(result, kept_text: str) -> dict:
+        """Peores valores por segmento y qué se descartó (para el log)."""
+        segments = GroqTranscriber._segments_of(result)
+        if not segments:
+            return {"segs": 0}
+        dropped = [_segment_rejection(seg) for seg in segments]
+        raw = (getattr(result, "text", "") or "").strip()
+        return {
+            "segs": len(segments),
+            "segs_drop": sum(1 for d in dropped if d),
+            "logprob_min": round(min(_field(seg, "avg_logprob", 0.0) for seg in segments), 3),
+            "no_speech_max": round(max(_field(seg, "no_speech_prob", 0.0) for seg in segments), 3),
+            "compression_max": round(max(_field(seg, "compression_ratio", 0.0) for seg in segments), 2),
+            # Texto crudo de Whisper sólo si el filtro le sacó algo: así se ve
+            # qué se tiró (alucinación, segmento flojo).
+            "raw_text": raw if raw != kept_text else None,
+        }
 
     @staticmethod
     def _segments_of(result) -> list:

@@ -7,13 +7,20 @@ el .env con datos y no a ojo.
     python log_report.py --dir /otra/carpeta
 
 Qué muestra:
-- Corridas (arranques) y qué parámetros cambiaron entre una y otra.
+- Corridas (arranques), qué parámetros cambiaron entre una y otra, cómo
+  terminó cada una (cierre limpio o cortada: apagón/desenchufe) y los cambios
+  de código (changelog.py) que aparecen por primera vez en el rango.
 - VAD: frases cerradas por motivo; nivel de las aceptadas vs las descartadas
   por lejanas; cuántas quedaron "casi" (a <20 % del umbral); ráfagas de voz
   que no llegaron a abrir.
 - Ruido de fondo (heartbeat): percentiles y cuánto tiempo estuvo en el tope
   NOISE_FLOOR_MAX (si es mucho, el umbral real lo pone el ruido).
-- STT: destino de cada frase, latencia y confianza de Groq.
+- STT: destino de cada frase, latencia y confianza de Groq, métricas de
+  Whisper (logprob/no_speech) de lo enviado vs lo descartado, y las frases
+  enviadas con confianza baja (candidatas a basura).
+- Turnos del robot (speak): latencia desde el envío hasta que habla, duración,
+  SPEAK_END perdidos; órdenes de corte (barge) y si el robot se calló.
+- Eventos al orquestador (orch_ev): cuántos no llegaron.
 - Voz (speaker_id): similitudes aceptadas / rechazadas, rechazos cerca del
   umbral, reconocimientos al despertar, decisiones de la memoria de voces.
 - Frases mezcladas (mix_trim.py, MIX_TRIM_ENABLED): cuántas se recortaron,
@@ -92,13 +99,35 @@ def main() -> None:
     for c in configs:
         line = f"  {fmt_t(c['t'])} run={c['run']} git={c.get('git')} mic={c.get('MIC_MODE')}"
         if prev is not None:
-            skip = {"t", "run", "k", "ev", "voices"}
+            skip = {"t", "run", "k", "ev", "voices", "changes", "boot_uptime_s"}
             diff = [f"{k}: {prev.get(k)} -> {c.get(k)}" for k in sorted(set(c) | set(prev))
                     if k not in skip and prev.get(k) != c.get(k)]
             if diff:
                 line += "\n      cambió: " + "; ".join(diff[:12])
+        run_recs = [r for r in records if r.get("run") == c["run"]]
+        ends = [r for r in run_recs if r.get("ev") == "exit"]
+        if ends:
+            line += f"\n      cerró: {ends[-1].get('reason')} tras {ends[-1].get('ran_s', 0) / 60:.0f} min"
+        elif c is not configs[-1]:
+            line += (f"\n      SIN cierre: último registro {fmt_t(run_recs[-1]['t'])} "
+                     "(apagón, desenchufe, kill -9 o cuelgue)")
+        if c.get("boot_uptime_s") is not None and c["boot_uptime_s"] < 600:
+            line += f" [la Pi recién arrancaba: {c['boot_uptime_s']:.0f}s]"
         print(line)
         prev = c
+    seen_changes: set = set()
+    new_changes = []
+    for c in configs:
+        for ch in c.get("changes") or []:
+            if ch.get("id") not in seen_changes:
+                seen_changes.add(ch.get("id"))
+                new_changes.append((c, ch))
+    if new_changes:
+        print("  cambios de código vigentes desde (changelog.py):")
+        for c, ch in new_changes:
+            print(f"    [{ch.get('date')}] {ch.get('id')} (desde run {c['run']}): {ch.get('what')}")
+    elif configs and not any(c.get("changes") for c in configs):
+        print("  (corridas anteriores al changelog: sin cambios registrados en el log)")
     if cfg:
         keys = ("NEAR_RMS_THRESHOLD", "RMS_THRESHOLD", "NEAR_SNR_RATIO", "NOISE_FLOOR_MAX",
                 "ATTENTION_LEVEL_RATIO", "SPEAKER_MIN_SIMILARITY_NEW",
@@ -149,7 +178,48 @@ def main() -> None:
     print(f"  latencia Groq: {pct([s.get('stt_s') for s in stt], 50, 90, 99)}")
     print(f"  confianza:     {pct([s.get('conf') for s in stt if s.get('text')], 10, 50)}")
     print(f"  audio enviado: {pct([s.get('audio_s') for s in stt if 'stt_s' in s], 50, 90)} s")
+    sent = [s for s in stt if s.get("outcome") == "enviada"]
+    with_m = [s for s in stt if s.get("logprob_min") is not None]
+    if with_m:
+        print(f"  logprob_min enviadas:    {pct([s['logprob_min'] for s in sent if s.get('logprob_min') is not None], 10, 50)}")
+        print(f"  logprob_min descartadas: {pct([s['logprob_min'] for s in with_m if s.get('outcome') != 'enviada'], 10, 50)}")
+        print(f"  no_speech_max enviadas:  {pct([s.get('no_speech_max') for s in sent], 50, 90)}")
+        filtered = [s for s in with_m if s.get("raw_text")]
+        for s in filtered[-5:]:
+            print(f"    filtrado: «{s['raw_text']}» -> «{s.get('text', '')}»")
+    low = [s for s in sent if s.get("conf") is not None and s["conf"] < 0.45]
+    if low:
+        print(f"  enviadas con confianza < 0.45: {len(low)} de {len(sent)}")
+        for s in low[-8:]:
+            print(f"    conf={s['conf']:.2f} logprob_min={s.get('logprob_min')} «{s.get('sent_text') or s.get('text')}»")
     print()
+
+    # --- turnos del robot / cortes / eventos ------------------------------------
+    speaks = events(records, "speak")
+    barges = events(records, "barge")
+    orch = events(records, "orch_ev")
+    timeouts = [e for e in speaks if e.get("end") == "timeout"]
+    stopped = [e for e in speaks if e.get("stops")]
+    if speaks or barges or orch:
+        print("== Robot hablando (speak / barge / orch_ev)")
+        for kind in ("texto", "ack"):
+            rs = [e.get("reply_s") for e in speaks if e.get("reply") == kind]
+            if rs:
+                label = "transcript -> habla" if kind == "texto" else "wake -> «Sí, dime»"
+                print(f"  latencia {label}: {pct(rs, 50, 90)} s")
+        print(f"  turnos: {len(speaks)}; duración {pct([e.get('dur_s') for e in speaks], 50, 90)} s; "
+              f"SPEAK_END perdidos: {len(timeouts)}")
+        if barges:
+            print("  cortes oídos: " + ", ".join(f"{k}={n}" for k, n in Counter(
+                b.get("outcome") for b in barges).most_common())
+                  + f"; re-despertó {sum(1 for b in barges if b.get('rewake'))}"
+                  f" de {sum(1 for b in barges if b.get('rewake') is not None)}")
+        if stopped:
+            print(f"  tras un corte siguió hablando: {pct([e.get('after_stop_s') for e in stopped], 50, 90)} s")
+        failed = Counter(e.get("name") for e in orch if not e.get("ok"))
+        print(f"  eventos al orquestador: {len(orch)}; no llegaron: "
+              + (", ".join(f"{k}={n}" for k, n in failed.most_common()) or "0"))
+        print()
 
     # --- voz -------------------------------------------------------------------
     judged = [s for s in stt if s.get("spk_sim") is not None]
@@ -219,6 +289,21 @@ def main() -> None:
     stt_s = [s.get("stt_s") for s in stt if s.get("stt_s") is not None]
     if stt_s and np.percentile(stt_s, 90) > 2.0:
         hints.append("La latencia de Groq p90 pasa 2 s: revisar red/WiFi de la Pi.")
+    if timeouts:
+        hints.append(f"{len(timeouts)} turnos del robot sin SPEAK_END (desmute por timeout): "
+                     "revisar en el log del orquestador si se colgó/reinició o si no lo manda.")
+    slow_stop = [e for e in stopped if (e.get("after_stop_s") or 0) > 3]
+    if slow_stop:
+        hints.append(f"{len(slow_stop)} veces el robot siguió hablando >3 s después de una orden de "
+                     "corte: el orquestador no está cortando el TTS al recibir @@event:stop.")
+    if orch and sum(1 for e in orch if not e.get("ok")) >= 2:
+        hints.append("Eventos al orquestador que no llegaron (ver arriba): si se repite, poner "
+                     "LAN y Tailscale en ORCHESTRATOR_IP.")
+    unclean = [c for c in configs[:-1]
+               if not any(r.get("ev") == "exit" and r.get("run") == c["run"] for r in records)]
+    if unclean:
+        hints.append(f"{len(unclean)} corrida(s) terminaron sin cierre: si nadie la desenchufó, "
+                     "mirar alimentación (POWER) y activar journal persistente en la Pi.")
     print("== Pistas")
     print("\n".join(f"  - {h}" for h in hints) if hints else "  (nada llamativo)")
 

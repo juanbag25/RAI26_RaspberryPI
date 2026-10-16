@@ -97,9 +97,13 @@ LANGUAGE = "es"
 # "RAI, vení" alucinado sería un comando falso. Un eco de >=4 palabras seguidas
 # del prompt se descarta (main.is_prompt_echo); el resto lo filtran las
 # métricas de confianza (STT_MAX_NO_SPEECH_PROB y compañía).
+# Sin rótulos tipo "Vocabulario:": con audio flojo Whisper devolvía la palabra
+# rótulo sola («¡Vocabulario!», «Vocabulario, o xerray.», log del 2026-10-16) y
+# como eco de 1-3 palabras pasaba el filtro. Por si se cuela igual, está en
+# STT_HALLUCINATIONS.
 STT_PROMPT = _env_str(
     "STT_PROMPT",
-    "Conversación en español con RAI, un perro robot del ITBA. Vocabulario: "
+    "Conversación en español con RAI, un perro robot del ITBA: "
     "sentate, parate, levantate, caminá, avanzá, retrocedé, girá, frená, "
     "saludá, izquierda, derecha, adelante, atrás, aula, ascensor, entrada.",
 )
@@ -125,6 +129,8 @@ STT_HALLUCINATIONS = _env_list("STT_HALLUCINATIONS", (
     "musica", "aplausos", "risas",
     "*amara org", "*subtitulos realizados por", "*subtitulado por",
     "*suscribete al canal", "*dale like", "*gracias por ver el video",
+    # Eco del rótulo del STT_PROMPT viejo (ver arriba): nadie le dice esto al perro.
+    "*vocabulario",
 ))
 
 # --- Control de mute (aviso del orquestador) ----------------------------------

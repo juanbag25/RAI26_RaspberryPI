@@ -34,8 +34,11 @@ audio. Dos clases de registro:
 - Líneas de consola: {"t", "run", "k": ok|drop|info|warn|err|dim|dbg, "tag",
   "msg"} (+ los valores de drop() como campos).
 - Eventos estructurados (`event()`): {"t", "run", "k": "ev", "ev": nombre,
-  ...campos}. Son los que se analizan: config al arrancar, cada utterance y
-  su destino, heartbeat, wake, voz.
+  ...campos}. Son los que se analizan: config al arrancar (con `changes`,
+  ver changelog.py), cada utterance y su destino, heartbeat, wake, voz,
+  turnos del robot (`speak`), órdenes de corte (`barge`), eventos al
+  orquestador (`orch_ev`), cierre (`exit`) y cómo terminó la anterior
+  (`prev_run`).
 
 Rotación: un archivo por día; al arrancar y al cambiar de día se borran los
 de más de LOG_KEEP_DAYS días (60) y, si el total pasa LOG_MAX_MB (500), los
@@ -226,6 +229,33 @@ def persist(directory: str | None = None) -> str | None:
         warn("LOG", f"no pude crear {directory} ({exc}): sin log persistente")
         return None
     return _sink.dir
+
+
+def previous_run_end() -> dict | None:
+    """Último registro de la corrida anterior (el más nuevo del log que no es
+    de esta). Si no es un evento `exit`, esa corrida terminó sin cierre:
+    apagón, desenchufe, kill -9 o cuelgue (ver main.py). None si no hay log."""
+    if _sink is None:
+        return None
+    files = sorted((f for f in os.listdir(_sink.dir)
+                    if f.startswith("stt-") and f.endswith(".jsonl")), reverse=True)
+    for name in files[:2]:
+        path = os.path.join(_sink.dir, name)
+        try:
+            with open(path, "rb") as f:
+                f.seek(0, os.SEEK_END)
+                f.seek(max(0, f.tell() - 65536))
+                tail = f.read().decode("utf-8", errors="replace")
+        except OSError:
+            continue
+        for line in reversed(tail.replace("\x00", "").splitlines()):
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue  # línea cortada (apagón) o la primera del tramo leído
+            if rec.get("run") != _sink.run:
+                return rec
+    return None
 
 
 def event(name: str, **fields: object) -> None:
