@@ -15,6 +15,11 @@ Al terminar, el launcher avisa por el puerto de control (CTRL_PORT):
 esperando «oye rai») o `LAUNCH_FAILED` (si fue el preflight, el robot ya
 lo dijo por el parlante, con SPEAK_START/END a esta Pi).
 
+Mientras el stack arranca, `stack_starting()` le dice a OrchestratorEvents que no
+mande avisos (awake/asleep): no hay orquestador y sólo serían errores de
+conexión en el log. Si el «rai arriba» vale como wake (RUNNING, o ningún
+launcher contestó), esos avisos salen normalmente apenas se sabe.
+
 Sin launcher (dev_orchestrator.sh apuntando a la PC, Jetson apagada) la
 conexión falla, se loguea y la frase queda como un wake común: no rompe nada.
 """
@@ -24,6 +29,7 @@ from __future__ import annotations
 import socket
 import struct
 import threading
+import time
 from typing import Callable
 
 from log import dim, event, info, ok, warn
@@ -31,6 +37,9 @@ from wake_word import normalize
 
 CONNECT_TIMEOUT_S = 1.5
 REPLY_TIMEOUT_S = 3.0
+# Tope de «arrancando» por si nunca llega ORCH_READY / LAUNCH_FAILED (launcher
+# caído a mitad): pasado esto, los avisos al orquestador vuelven a salir.
+STARTING_MAX_S = 600.0
 
 
 def _recv_exact(conn: socket.socket, n: int) -> bytes | None:
@@ -54,6 +63,9 @@ class LaunchRequest:
         self._on_ready = on_ready
         self._lock = threading.Lock()
         self._in_flight = False
+        self._settled = threading.Event()  # sin pedido al launcher en vuelo
+        self._settled.set()
+        self._starting_at: float | None = None
 
     @property
     def enabled(self) -> bool:
@@ -67,6 +79,25 @@ class LaunchRequest:
         padded = f" {normalize(text)} "
         return any(f" {p} " in padded for p in self._phrases)
 
+    def expect(self) -> None:
+        """Se oyó la frase y viene un request(): que OrchestratorEvents espere la
+        respuesta del launcher antes de avisar el wake (el wake se registra
+        antes que el pedido). cancel() si al final no se pide."""
+        if self.enabled:
+            self._settled.clear()
+
+    def cancel(self) -> None:
+        with self._lock:
+            if not self._in_flight:
+                self._settled.set()
+
+    def stack_starting(self) -> bool:
+        """¿El launcher está levantando el stack? Si hay un pedido en vuelo,
+        espera su respuesta (a lo sumo unos segundos)."""
+        self._settled.wait(timeout=(CONNECT_TIMEOUT_S + REPLY_TIMEOUT_S) * max(1, len(self.hosts)))
+        started = self._starting_at
+        return started is not None and time.monotonic() - started < STARTING_MAX_S
+
     def request(self, heard: str) -> None:
         """Pide el arranque en un hilo aparte (no frena el loop de captura)."""
         if not self.enabled:
@@ -75,14 +106,18 @@ class LaunchRequest:
             if self._in_flight:
                 return
             self._in_flight = True
+            self._settled.clear()
         threading.Thread(target=self._run, args=(heard,), name="launch", daemon=True).start()
 
     def _run(self, heard: str) -> None:
         try:
             host, reply = self._ask()
+            if reply in ("STARTING", "BUSY"):
+                self._starting_at = time.monotonic()
         finally:
             with self._lock:
                 self._in_flight = False
+            self._settled.set()
         event("launch", heard=heard, host=host, reply=reply)
         if reply is None:
             warn("LAUNCH", f"«{heard}»: no contestó ningún launcher ({self.describe()}); "
@@ -118,12 +153,14 @@ class LaunchRequest:
     # -- avisos del launcher por CTRL_PORT (ctrl_server.py) --------------------
 
     def ready(self) -> None:
+        self._starting_at = None
         ok("LAUNCH", "el launcher levantó el orquestador: decí «oye rai»")
         event("launch_done", ok=True)
         if self._on_ready is not None:
             self._on_ready()
 
     def failed(self) -> None:
+        self._starting_at = None
         warn("LAUNCH", "el arranque falló (ver ~/logs/*_autostart.log en la Jetson)")
         event("launch_done", ok=False)
         info("LAUNCH", "sigo dormido; «rai, arriba» para reintentar")

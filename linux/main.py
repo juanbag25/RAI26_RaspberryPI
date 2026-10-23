@@ -529,10 +529,12 @@ class OrchestratorEvents:
     responde: corren en su propio hilo, en orden.
     """
 
-    def __init__(self, wake: WakeWord, orchestrator: OrchestratorLink, on_asleep=None) -> None:
+    def __init__(self, wake: WakeWord, orchestrator: OrchestratorLink, on_asleep=None,
+                 launch: LaunchRequest | None = None) -> None:
         self._wake = wake
         self._orchestrator = orchestrator
         self._on_asleep = on_asleep
+        self._launch = launch
         self._queue: "queue.Queue[str]" = queue.Queue()
 
     def send(self, name: str) -> None:
@@ -571,6 +573,9 @@ class OrchestratorEvents:
                 self._post(name)
 
     def _post(self, name: str) -> None:
+        if self._launch is not None and self._launch.stack_starting():
+            dim("WAKE", f"no aviso «{name}» al orquestador: el stack está arrancando")
+            return
         t0 = time.monotonic()
         sent = self._orchestrator.send(ORCH_EVENT_PREFIX + name, quiet=True)
         if sent and name == "awake":
@@ -962,7 +967,7 @@ def main() -> None:
         spatial.on_asleep()
         speaker.clear()
 
-    events = OrchestratorEvents(wake, orchestrator, on_asleep=on_asleep)
+    events = OrchestratorEvents(wake, orchestrator, on_asleep=on_asleep, launch=launch)
     if WAKE_WORD_ENABLED:
         wake.on_announce = events.kick
         events.start()
@@ -1128,12 +1133,17 @@ def main() -> None:
                     if voice is None:
                         voice = (np.frombuffer(b"".join(recent_pcm), dtype=np.int16)
                                  .astype(np.float32) / 32768.0)
+                    is_launch = spotter.is_launch(heard)
+                    if is_launch:
+                        launch.expect()
                     if handle_wake(heard, af.t, announce=False, voice=voice):
                         counters.wakes += 1
                         # «rai, arriba»: además, que el launcher levante el
                         # stack si no está (si está, queda como este wake).
-                        if spotter.is_launch(heard):
+                        if is_launch:
                             launch.request(heard)
+                    elif is_launch:
+                        launch.cancel()
                         # No se tira la utterance: si la persona sigue de
                         # largo ("oye rai, sentate"), la orden ya empezó acá y
                         # cortarla se comía la primera palabra. Se marca y en

@@ -29,7 +29,7 @@ import time
 from typing import Callable
 
 from config import MUTE_TIMEOUT_S, SPEAK_END_TAIL_S
-from log import err, event, info, warn
+from log import dim, err, event, info, warn
 
 _MAX_MESSAGE_BYTES = 1024
 
@@ -179,7 +179,9 @@ def _serve_forever(port: int, mute: SpeakMute,
         with conn:
             header = _recv_exact(conn, 4)
             if header is None:
-                warn("CTRL", f"conexión de {addr[0]} cerrada sin header")
+                # Sin datos: el preflight del launcher sólo prueba que el
+                # puerto esté abierto («la Pi está escuchando en :9001»).
+                dim("CTRL", f"conexión de {addr[0]} sin datos (prueba de puerto)")
                 continue
             (length,) = struct.unpack("!I", header)
             if length == 0 or length > _MAX_MESSAGE_BYTES:
