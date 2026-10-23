@@ -569,6 +569,19 @@ NET   ✓ enviado «Vení para acá.» (0.01s)
 - El texto que llega a Groq después del wake pasa igual por el filtro de
   texto de abajo: si Whisper escribe "rai vení" se recorta a "vení".
 
+### Arranque por voz: «rai, arriba»
+
+Con el robot prendido pero el stack de la Jetson sin levantar, **«rai,
+arriba»** o **«rai, levántate»** (`LAUNCH_PHRASES`, en la gramática del
+spotter; en modo `text`, en la transcripción) le piden al launcher de la
+Jetson (`R-AI-026/orchestrator/launcher.py`, `LAUNCHER_IP`:`LAUNCHER_PORT`,
+default las IPs de `ORCHESTRATOR_IP` y 9005) que corra
+`start_orchestrator.sh` ([`launch_request.py`](launch_request.py)). Mientras
+arranca la Pi vuelve a dormirse; si el preflight falla el robot lo dice por
+su parlante. Si el orquestador ya corre, la frase vale como un «oye rai».
+`dev_orchestrator.sh` apunta también `LAUNCHER_IP` a tu PC: en dev nunca
+arranca la Jetson. En el log persistente: eventos `launch` y `launch_done`.
+
 ### Modo `text`: sobre la transcripción
 
 Sin modelo extra: cada frase que pasa el VAD se transcribe y se busca "rai" en

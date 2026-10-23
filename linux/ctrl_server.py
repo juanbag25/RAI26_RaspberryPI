@@ -6,6 +6,9 @@ del sistema ([uint32 big-endian][payload UTF-8]), dos mensajes:
     SPEAK_START  -> el robot empieza a hablar: silenciar el mic
     SPEAK_END    -> terminó: volver a escuchar (SPEAK_END_TAIL_S después)
 
+Otros mensajes (p. ej. `ORCH_READY` / `LAUNCH_FAILED` del launcher de la
+Jetson, ver launch_request.py) van a los `handlers` de `start_in_background`.
+
 `SpeakMute.is_muted()` se consulta desde el loop de captura de main.py. Si un
 SPEAK_END se pierde (red, crash del orquestador), el mute expira solo a los
 MUTE_TIMEOUT_S segundos para no dejar el robot sordo.
@@ -164,7 +167,8 @@ def _recv_exact(conn: socket.socket, n: int) -> bytes | None:
     return bytes(buf)
 
 
-def _serve_forever(port: int, mute: SpeakMute) -> None:
+def _serve_forever(port: int, mute: SpeakMute,
+                   handlers: dict[str, Callable[[], None]]) -> None:
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind(("0.0.0.0", port))
@@ -185,13 +189,19 @@ def _serve_forever(port: int, mute: SpeakMute) -> None:
             if payload is None:
                 warn("CTRL", f"conexión de {addr[0]} cortada a mitad del payload")
                 continue
+            message = payload.decode("utf-8", errors="replace")
             try:
-                mute.handle(payload.decode("utf-8", errors="replace"))
+                if message in handlers:
+                    handlers[message]()
+                else:
+                    mute.handle(message)
             except Exception as exc:  # noqa: BLE001 - nunca matar el server
                 err("CTRL", str(exc))
 
 
-def start_in_background(port: int, mute: SpeakMute) -> threading.Thread:
-    thread = threading.Thread(target=_serve_forever, args=(port, mute), daemon=True)
+def start_in_background(port: int, mute: SpeakMute,
+                        handlers: dict[str, Callable[[], None]] | None = None) -> threading.Thread:
+    thread = threading.Thread(target=_serve_forever, args=(port, mute, dict(handlers or {})),
+                              daemon=True)
     thread.start()
     return thread

@@ -12,6 +12,16 @@ log (un descarte nuevo, un evento nuevo, un umbral con otro significado).
 
 CHANGES: list[dict] = [
     {
+        "id": "launch-por-voz",
+        "date": "2026-10-23",
+        "what": "Arranque por voz: «rai arriba» / «rai levántate» (LAUNCH_PHRASES, en "
+                "la gramática del spotter) valen como wake y además le piden al "
+                "launcher de la Jetson (LAUNCHER_PORT 9005) que corra "
+                "start_orchestrator.sh. Eventos nuevos: launch (heard, host, reply "
+                "STARTING|BUSY|RUNNING|null) y launch_done (ok). Con STARTING/BUSY "
+                "la Pi se vuelve a dormir sola (sale un asleep sin los 6 s).",
+    },
+    {
         "id": "speaker-new-012",
         "date": "2026-10-23",
         "what": "SPEAKER_MIN_SIMILARITY_NEW baja de 0.15 a 0.12: con una voz nueva o "

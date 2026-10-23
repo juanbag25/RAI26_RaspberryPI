@@ -13,7 +13,9 @@
 #      "rai26-stt") si existe, y cualquier `main.py` suelto (tmux, nohup).
 #   3. Corre `python linux/main.py` en primer plano con ORCHESTRATOR_IP pisado
 #      por variable de entorno (main.py hace load_dotenv() sin override, así
-#      que el .env no se toca).
+#      que el .env no se toca). LAUNCHER_IP también: «rai, arriba» nunca
+#      arranca la Jetson en dev (si en la PC no corre launcher.py, queda como
+#      un «oye rai» común).
 #
 # Ojo: el orquestador de la PC también tiene que poder llegar a la Pi (puerto
 # CTRL_PORT=9001, mensajes SPEAK_START/SPEAK_END). Configurale la IP de
@@ -158,4 +160,4 @@ cd "$ROOT"
 # shellcheck disable=SC1091
 [ -f .venv/bin/activate ] && source .venv/bin/activate
 log "corriendo linux/main.py contra $IP:$PORT (Ctrl+C para volver)"
-ORCHESTRATOR_IP="$IP" python linux/main.py
+ORCHESTRATOR_IP="$IP" LAUNCHER_IP="$IP" python linux/main.py

@@ -37,6 +37,8 @@ from config import (
     DOA_SPEAKER_SECTOR,
     DOA_TOLERANCE_DEG,
     FRAME_MS,
+    LAUNCH_PHRASES,
+    LAUNCHER_PORT,
     MIC_MODE,
     MIX_TRIM_ENABLED,
     ORCH_EVENT_PREFIX,
@@ -59,6 +61,7 @@ from config import (
 )
 from ctrl_server import SpeakMute, start_in_background
 from doa import DoaFocus, DoaReading, in_any_sector, parse_sectors, to_robot_frame
+from launch_request import LaunchRequest
 from changelog import CHANGES
 from log import (DEBUG, dbg, dim, drop, err, event, fmt, info, ok, persist,
                  previous_run_end, warn)
@@ -184,6 +187,11 @@ class OrchestratorLink:
     def describe(self) -> str:
         return ", ".join(f"{h}:{self.port}" for h in self.hosts)
 
+    def reset_backoff(self) -> None:
+        """El orquestador acaba de levantar: reintentar ya."""
+        with self._lock:
+            self._down_until = 0.0
+
     def send(self, text: str, *, quiet: bool = False) -> bool:
         with self._lock:
             if time.monotonic() < self._down_until:
@@ -292,6 +300,7 @@ def transcribe_worker(
     counters: Counters,
     speaker: SpeakerLock,
     text_wake: bool,
+    launch: LaunchRequest,
 ) -> None:
     """Consume utterances cerradas por el VAD y hace el trabajo lento (STT +
     red) fuera del hilo de captura de audio.
@@ -303,7 +312,8 @@ def transcribe_worker(
 
     Despierto, la huella de voz (speaker_id.py) se calcula en paralelo con
     Groq: no suma latencia, y si es otra voz se tira la transcripción.
-    `text_wake`: sin spotter, el wake (y la referencia de voz) sale del texto.
+    `text_wake`: sin spotter, el wake (y la referencia de voz) sale del texto,
+    y también la frase de arranque («rai, arriba», ver launch_request.py).
 
     MIX_TRIM_ENABLED: una frase rechazada entera por dirección o por voz se
     juzga por tramos (mix_trim.py) y, si se puede, se transcribe sólo la
@@ -405,6 +415,8 @@ def transcribe_worker(
         if is_prompt_echo(text):
             drop("STT", "eco del prompt de Whisper: es ruido, no habló nadie")
             return "eco_prompt"
+        if text_wake and launch.matches(text):
+            launch.request(text)
         if wake_prefix:
             text = wake.strip_wake(text)
             if not text:
@@ -875,7 +887,22 @@ def main() -> None:
     # contestar, lo natural es que le sigan hablando sin repetir el nombre.
     # El SPEAK_START congela la ventana mientras el robot habla.
     mute = SpeakMute(on_speak_end=wake.refresh, on_speak_start=wake.hold)
-    start_in_background(CTRL_PORT, mute)
+    # Arranque por voz («rai, arriba»): el launcher de la Jetson corre
+    # start_orchestrator.sh. Mientras arranca, la Pi vuelve a dormirse; al
+    # terminar avisa ORCH_READY / LAUNCH_FAILED por el puerto de control.
+    # LAUNCHER_IP vacío = las IPs del orquestador (con dev_orchestrator.sh,
+    # la PC: sin launcher ahí, la frase queda como un «oye rai» común).
+    launcher_ip = os.getenv("LAUNCHER_IP", "").strip() or ORCHESTRATOR_IP
+
+    def on_launch_ready() -> None:
+        orchestrator.reset_backoff()
+        wake.sleep()
+
+    launch = LaunchRequest([h.strip() for h in launcher_ip.split(",") if h.strip()],
+                           LAUNCHER_PORT, LAUNCH_PHRASES if WAKE_WORD_ENABLED else (),
+                           on_starting=wake.sleep, on_ready=on_launch_ready)
+    start_in_background(CTRL_PORT, mute, handlers={"ORCH_READY": launch.ready,
+                                                   "LAUNCH_FAILED": launch.failed})
     orchestrator.on_reply_expected = mute.expect_reply
     dim("CTRL", f"espero SPEAK_START/SPEAK_END del orquestador en :{CTRL_PORT}")
 
@@ -889,7 +916,8 @@ def main() -> None:
     if WAKE_WORD_ENABLED and WAKE_MODE == "audio":
         try:
             from wake_spotter import WakeSpotter
-            spotter = WakeSpotter(stop_phrases=SPEAK_STOP_PHRASES if barge_mode else ())
+            spotter = WakeSpotter(stop_phrases=SPEAK_STOP_PHRASES if barge_mode else (),
+                                  launch_phrases=LAUNCH_PHRASES)
         except Exception as exc:  # noqa: BLE001 - ImportError, modelo ausente...
             warn("SPOT", f"no pude arrancar el wake por audio ({type(exc).__name__}: {exc}); "
                  f"caigo a WAKE_MODE=text")
@@ -910,6 +938,9 @@ def main() -> None:
     elif barge_mode:
         info("CTRL", "mientras el robot habla escucho órdenes de corte: "
              + ", ".join(f"«{p}»" for p in SPEAK_STOP_PHRASES))
+    if launch.enabled:
+        info("LAUNCH", "con el stack apagado, " + " / ".join(f"«{p}»" for p in LAUNCH_PHRASES[:2])
+             + f" lo arranca (launcher en {launch.describe()})")
     dim("MAIN", f"heartbeat cada {HEARTBEAT_S:.0f}s (LOG_HEARTBEAT_S), "
         f"debug {'ON' if DEBUG else 'off'} (LOG_DEBUG=1)")
 
@@ -920,7 +951,7 @@ def main() -> None:
     worker = threading.Thread(
         target=transcribe_worker,
         args=(audio_queue, transcriber, wake, orchestrator, counters,
-              speaker, spotter is None),
+              speaker, spotter is None, launch),
         daemon=True,
     )
     worker.start()
@@ -937,7 +968,7 @@ def main() -> None:
         events.start()
 
     event("config", **config_snapshot(), git=_git_version(), host=socket.gethostname(),
-          orchestrator=orchestrator.describe(), vad_engine=vad.engine,
+          orchestrator=orchestrator.describe(), launcher=launch.describe(), vad_engine=vad.engine,
           spotter=spotter is not None, speaker=speaker.enabled,
           voices=[v.label for v in speaker.known_voices()], heartbeat_s=HEARTBEAT_S,
           max_queue_age_s=MAX_QUEUE_AGE_S, boot_uptime_s=boot_uptime_s, changes=CHANGES)
@@ -1099,6 +1130,10 @@ def main() -> None:
                                  .astype(np.float32) / 32768.0)
                     if handle_wake(heard, af.t, announce=False, voice=voice):
                         counters.wakes += 1
+                        # «rai, arriba»: además, que el launcher levante el
+                        # stack si no está (si está, queda como este wake).
+                        if spotter.is_launch(heard):
+                            launch.request(heard)
                         # No se tira la utterance: si la persona sigue de
                         # largo ("oye rai, sentate"), la orden ya empezó acá y
                         # cortarla se comía la primera palabra. Se marca y en

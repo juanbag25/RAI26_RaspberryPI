@@ -334,6 +334,18 @@ WAKE_MODE = _env_str("WAKE_MODE", "audio").lower()
 # "rey": por eso están las tres. Agregá variantes con el prefijo que uses
 # ("hola rai", "che rai") en .env: WAKE_PHRASES=oye rai,oye ray,hola rai
 WAKE_PHRASES = _env_list("WAKE_PHRASES", ("oye rai", "oye ray", "oye rey"))
+# Arranque por voz (launch_request.py): con el robot prendido pero el stack
+# sin levantar, estas frases le piden al launcher de la Jetson
+# (orchestrator/launcher.py, LAUNCHER_PORT) que corra start_orchestrator.sh.
+# Si el orquestador ya corre valen como un «oye rai». Se pasan a Vosk TAL
+# CUAL (con tilde: "levantate" sin tilde no está en su vocabulario y Vosk
+# ignoraría la palabra). Vacío = desactivado.
+LAUNCH_PHRASES = _env_list("LAUNCH_PHRASES", (
+    "rai arriba", "ray arriba", "rey arriba",
+    "rai levántate", "ray levántate", "rey levántate",
+))
+# Puerto del launcher; su IP es LAUNCHER_IP (default: las de ORCHESTRATOR_IP).
+LAUNCHER_PORT = int(_env_float("LAUNCHER_PORT", 9005))
 # Disparar con el resultado PARCIAL del reconocedor (apenas ve la frase) en
 # vez de esperar a que Vosk cierre la utterance. Más rápido (~300 ms antes).
 WAKE_ON_PARTIAL = _env_bool("WAKE_ON_PARTIAL", True)
