@@ -412,7 +412,7 @@ SPEAKER_MODEL_NAME = _env_str("SPEAKER_MODEL_NAME", "nemo_en_titanet_small.onnx"
 # perfil, SPEAKER_MIN_SIMILARITY_KNOWN; en el medio, lineal. Sólo cuenta el
 # perfil con SPEAKER_MEMORY=on (observe/off: siempre el de voz nueva).
 # Calibrar con `python speaker_id.py`.
-SPEAKER_MIN_SIMILARITY_NEW = _env_float("SPEAKER_MIN_SIMILARITY_NEW", 0.15)
+SPEAKER_MIN_SIMILARITY_NEW = _env_float("SPEAKER_MIN_SIMILARITY_NEW", 0.12)
 SPEAKER_MIN_SIMILARITY_KNOWN = _env_float("SPEAKER_MIN_SIMILARITY_KNOWN", 0.30)
 SPEAKER_KNOWN_S = _env_float("SPEAKER_KNOWN_S", 120.0)
 if os.getenv("SPEAKER_MIN_SIMILARITY", "").strip():

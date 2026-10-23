@@ -151,9 +151,9 @@ compara (similitud coseno) y por debajo del umbral se descarta
 (`SPK ✗ DESCARTADO otra voz sim=... minimo=...`). El umbral es **dinámico**:
 depende de cuánto conoce la voz de quien lo llamó (segundos de voz del perfil
 en la memoria de voces, ver abajo). Voz nueva o que apenas conoce:
-`SPEAKER_MIN_SIMILARITY_NEW` (0.15); con `SPEAKER_KNOWN_S` (120 s) o más de
+`SPEAKER_MIN_SIMILARITY_NEW` (0.12); con `SPEAKER_KNOWN_S` (120 s) o más de
 perfil: `SPEAKER_MIN_SIMILARITY_KNOWN` (0.30); en el medio, lineal (60 s →
-0.225). Con `SPEAKER_MEMORY=observe|off` siempre es el de voz nueva. Las frases aceptadas se suman
+0.21). Con `SPEAKER_MEMORY=observe|off` siempre es el de voz nueva. Las frases aceptadas se suman
 a la referencia (hasta 8 s), así que mejora con la charla. Frases de menos de
 0.7 s ("sí", "no") no se comparan. Al dormirse se olvida.
 

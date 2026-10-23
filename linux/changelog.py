@@ -12,6 +12,13 @@ log (un descarte nuevo, un evento nuevo, un umbral con otro significado).
 
 CHANGES: list[dict] = [
     {
+        "id": "speaker-new-012",
+        "date": "2026-10-23",
+        "what": "SPEAKER_MIN_SIMILARITY_NEW baja de 0.15 a 0.12: con una voz nueva o "
+                "poco conocida el umbral del speaker ID arranca en 0.12 (sube "
+                "lineal hasta _KNOWN=0.30 con SPEAKER_KNOWN_S de perfil).",
+    },
+    {
         "id": "rewake-barge-level",
         "date": "2026-10-16",
         "what": "«oye rai» como orden de corte mientras el robot habla ahora "
