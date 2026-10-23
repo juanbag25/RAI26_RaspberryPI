@@ -902,7 +902,9 @@ def main() -> None:
 
     def on_launch_ready() -> None:
         orchestrator.reset_backoff()
-        wake.sleep()
+        # El robot acaba de saludar con «¿qué hacemos hoy?»: se le puede
+        # contestar sin decir «oye rai».
+        wake.open_window()
 
     launch = LaunchRequest([h.strip() for h in launcher_ip.split(",") if h.strip()],
                            LAUNCHER_PORT, LAUNCH_PHRASES if WAKE_WORD_ENABLED else (),

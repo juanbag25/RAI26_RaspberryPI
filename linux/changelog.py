@@ -12,6 +12,15 @@ log (un descarte nuevo, un evento nuevo, un umbral con otro significado).
 
 CHANGES: list[dict] = [
     {
+        "id": "launch-es-reinicio",
+        "date": "2026-10-23",
+        "what": "«rai arriba» con el stack levantado ya no vale como «oye rai»: el "
+                "launcher lo reinicia entero (reply STARTING, no RUNNING). Frases "
+                "nuevas en LAUNCH_PHRASES: «rai reinicia» / «rai reiniciar». Con "
+                "ORCH_READY la Pi se DESPIERTA sin «Sí, dime» (antes se dormía): "
+                "el robot acaba de preguntar «¿qué hacemos hoy?».",
+    },
+    {
         "id": "freno-por-voz",
         "date": "2026-10-23",
         "what": "Freno por voz sin LLM: «rai frena» (BRAKE_PHRASES, en la gramática "

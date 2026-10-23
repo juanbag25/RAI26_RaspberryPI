@@ -8,12 +8,16 @@ length-prefixed). Contesta:
 
     STARTING / BUSY -> arranca (o ya estaba arrancando): la Pi vuelve a
                        dormirse; no hay orquestador que conteste «Sí, dime».
-    RUNNING         -> el orquestador ya corre: la frase vale como «oye rai».
+                       Con el stack ya levantado, el launcher lo REINICIA
+                       entero («Reiniciando sistemas»): también es STARTING.
+    RUNNING         -> (launcher viejo) el orquestador ya corre: la frase
+                       vale como «oye rai».
 
 Al terminar, el launcher avisa por el puerto de control (CTRL_PORT):
-`ORCH_READY` (levantó: se resetea el backoff del envío y la Pi queda dormida
-esperando «oye rai») o `LAUNCH_FAILED` (si fue el preflight, el robot ya
-lo dijo por el parlante, con SPEAK_START/END a esta Pi).
+`ORCH_READY` (levantó y el robot saludó con «¿qué hacemos hoy?": se resetea
+el backoff del envío y se abre la ventana sin «Sí, dime») o `LAUNCH_FAILED`
+(si fue el preflight, el robot ya lo dijo por el parlante, con
+SPEAK_START/END a esta Pi).
 
 Mientras el stack arranca, `stack_starting()` le dice a OrchestratorEvents que no
 mande avisos (awake/asleep): no hay orquestador y sólo serían errores de

@@ -185,6 +185,12 @@ class WakeWord:
         self._wake_new(announce=announce)
         ok("WAKE", f"DESPIERTO por audio, ventana {WAKE_WINDOW_S:.0f}s")
 
+    def open_window(self) -> None:
+        """Abre la ventana SIN anunciar (no hay «Sí, dime»): el stack recién
+        levantó y el robot ya preguntó «¿qué hacemos hoy?» (ORCH_READY)."""
+        self._wake_new(announce=False)
+        ok("WAKE", f"DESPIERTO: el stack terminó de arrancar, ventana {WAKE_WINDOW_S:.0f}s")
+
     def sleep(self) -> None:
         with self._lock:
             self._awake_until = 0.0

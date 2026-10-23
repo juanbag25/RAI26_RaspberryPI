@@ -337,12 +337,17 @@ WAKE_PHRASES = _env_list("WAKE_PHRASES", ("oye rai", "oye ray", "oye rey"))
 # Arranque por voz (launch_request.py): con el robot prendido pero el stack
 # sin levantar, estas frases le piden al launcher de la Jetson
 # (orchestrator/launcher.py, LAUNCHER_PORT) que corra start_orchestrator.sh.
-# Si el orquestador ya corre valen como un «oye rai». Se pasan a Vosk TAL
-# CUAL (con tilde: "levantate" sin tilde no está en su vocabulario y Vosk
-# ignoraría la palabra). Vacío = desactivado.
+# Con el stack ya levantado es un REINICIO completo (el launcher hace stop +
+# arranque y el robot dice «Reiniciando sistemas»): sirve para salir de un
+# estop o de un stack a medias. «rai reinicia» es lo mismo dicho a propósito.
+# Se pasan a Vosk TAL CUAL (con tilde: "levantate" sin tilde no está en su
+# vocabulario y Vosk ignoraría la palabra; "reiniciá"/"reiniciate" tampoco
+# están, "reinicia"/"reiniciar" sí). Vacío = desactivado.
 LAUNCH_PHRASES = _env_list("LAUNCH_PHRASES", (
     "rai arriba", "ray arriba", "rey arriba",
     "rai levántate", "ray levántate", "rey levántate",
+    "rai reinicia", "ray reinicia", "rey reinicia",
+    "rai reiniciar", "ray reiniciar", "rey reiniciar",
 ))
 # Orden de freno («rai frena»): la decide el spotter, NO el LLM. Vale siempre
 # (dormido, despierto o mientras el robot habla): manda el evento `brake` al
