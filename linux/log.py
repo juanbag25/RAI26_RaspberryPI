@@ -258,8 +258,11 @@ def previous_run_end() -> dict | None:
     return None
 
 
-def event(name: str, **fields: object) -> None:
-    """Evento estructurado: sólo al archivo (no ensucia la consola)."""
+def event(name: str, /, **fields: object) -> None:
+    """Evento estructurado: sólo al archivo (no ensucia la consola).
+
+    `name` es posicional para que los campos puedan llamarse `name` (orch_ev).
+    """
     if _sink is not None:
         _sink.write({"k": "ev", "ev": name, **fields})
 
