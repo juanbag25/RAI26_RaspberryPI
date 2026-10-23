@@ -37,6 +37,7 @@ from config import (
     DOA_SPEAKER_SECTOR,
     DOA_TOLERANCE_DEG,
     FRAME_MS,
+    BRAKE_PHRASES,
     LAUNCH_PHRASES,
     LAUNCHER_PORT,
     MIC_MODE,
@@ -922,7 +923,7 @@ def main() -> None:
         try:
             from wake_spotter import WakeSpotter
             spotter = WakeSpotter(stop_phrases=SPEAK_STOP_PHRASES if barge_mode else (),
-                                  launch_phrases=LAUNCH_PHRASES)
+                                  launch_phrases=LAUNCH_PHRASES, brake_phrases=BRAKE_PHRASES)
         except Exception as exc:  # noqa: BLE001 - ImportError, modelo ausente...
             warn("SPOT", f"no pude arrancar el wake por audio ({type(exc).__name__}: {exc}); "
                  f"caigo a WAKE_MODE=text")
@@ -943,6 +944,11 @@ def main() -> None:
     elif barge_mode:
         info("CTRL", "mientras el robot habla escucho órdenes de corte: "
              + ", ".join(f"«{p}»" for p in SPEAK_STOP_PHRASES))
+    if spotter is not None and BRAKE_PHRASES:
+        info("CTRL", "freno por voz (siempre, sin LLM): "
+             + ", ".join(f"«{p}»" for p in BRAKE_PHRASES[:2]))
+    elif BRAKE_PHRASES:
+        warn("CTRL", "sin spotter de audio no hay freno por voz (BRAKE_PHRASES)")
     if launch.enabled:
         info("LAUNCH", "con el stack apagado, " + " / ".join(f"«{p}»" for p in LAUNCH_PHRASES[:2])
              + f" lo arranca (launcher en {launch.describe()})")
@@ -1042,6 +1048,19 @@ def main() -> None:
 
     barge = BargeIn()
 
+    def brake(heard: str, now: float, *, speaking: bool) -> None:
+        """«rai frena»: lo decide el spotter, no el LLM. Vale dormido o
+        despierto; sólo se ignora si vino del parlante del robot."""
+        if speaking and spatial.from_speaker(now - WAKE_DOA_WINDOW_S, now):
+            drop("CTRL", f"«{heard}» (freno) vino del parlante del robot")
+            event("brake", heard=heard, outcome="parlante", speaking=speaking)
+            return
+        ok("CTRL", f"FRENO «{heard}»")
+        events.send("brake")
+        if speaking:
+            mute.note_stop()
+        event("brake", heard=heard, outcome="freno", speaking=speaking)
+
     info("NET", f"orquestador en {orchestrator.describe()}")
 
     # «Oye rai» y después ¿siguió hablando? (ver WAKE_ACK_DECIDE_MS)
@@ -1089,12 +1108,21 @@ def main() -> None:
                         info("MAIN", f"{drained} utterance(s) en cola descartada(s) "
                              "por mute (robot empezó a hablar)")
                 counters.muted_frames += 1
+                if spotter is not None and not barge_mode and BRAKE_PHRASES:
+                    # Sin barge-in el spotter igual escucha, sólo para frenar.
+                    spotter.feed(frame)
+                    heard = spotter.take_detection()
+                    if heard and spotter.is_brake(heard):
+                        brake(heard, af.t, speaking=True)
+                    continue
                 if barge_mode:
                     # Orden de corte: el spotter sigue oyendo mientras habla.
                     barge.feed(af.rms if af.rms is not None else vad.frame_rms(frame))
                     spotter.feed(frame)
                     heard = spotter.take_detection()
-                    if heard:
+                    if heard and spotter.is_brake(heard):
+                        brake(heard, af.t, speaking=True)
+                    elif heard:
                         loud, peak, robot_level = barge.loud_enough()
                         rewake = None
                         if spatial.from_speaker(af.t - WAKE_DOA_WINDOW_S, af.t):
@@ -1127,8 +1155,14 @@ def main() -> None:
             if spotter is not None:
                 spotter.feed(frame)
                 heard = spotter.take_detection()
+                if heard and spotter.is_brake(heard):
+                    brake(heard, af.t, speaking=False)
+                    # «rai frena» no va a Whisper/LLM: ya está resuelto.
+                    vad.discard_open_utterance(reason="era la orden de freno")
+                    ack_pending_t = None
+                    wake_utt_open = False
                 # Las órdenes de corte sólo valen mientras el robot habla.
-                if heard and not spotter.is_stop(heard):
+                elif heard and not spotter.is_stop(heard):
                     voice = vad.open_audio()
                     if voice is None:
                         voice = (np.frombuffer(b"".join(recent_pcm), dtype=np.int16)

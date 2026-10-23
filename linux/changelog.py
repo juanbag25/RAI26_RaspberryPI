@@ -12,6 +12,14 @@ log (un descarte nuevo, un evento nuevo, un umbral con otro significado).
 
 CHANGES: list[dict] = [
     {
+        "id": "freno-por-voz",
+        "date": "2026-10-23",
+        "what": "Freno por voz sin LLM: «rai frena» (BRAKE_PHRASES, en la gramática "
+                "del spotter) manda el evento `brake` al orquestador siempre "
+                "(dormido, despierto o mientras habla) y no se transcribe. Evento "
+                "nuevo en el log: brake (heard, outcome freno|parlante, speaking).",
+    },
+    {
         "id": "launch-por-voz",
         "date": "2026-10-23",
         "what": "Arranque por voz: «rai arriba» / «rai levántate» (LAUNCH_PHRASES, en "

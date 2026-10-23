@@ -344,6 +344,15 @@ LAUNCH_PHRASES = _env_list("LAUNCH_PHRASES", (
     "rai arriba", "ray arriba", "rey arriba",
     "rai levántate", "ray levántate", "rey levántate",
 ))
+# Orden de freno («rai frena»): la decide el spotter, NO el LLM. Vale siempre
+# (dormido, despierto o mientras el robot habla): manda el evento `brake` al
+# orquestador, que se calla, cancela la misión y frena (mission_node `stop`),
+# y la frase no se transcribe. "frená" con tilde no está en el vocabulario de
+# Vosk: va sin tilde. Vacío = desactivado (frenar queda sólo en el operador).
+BRAKE_PHRASES = _env_list("BRAKE_PHRASES", (
+    "rai frena", "ray frena", "rey frena",
+    "frena rai", "frena ray", "frena rey",
+))
 # Puerto del launcher; su IP es LAUNCHER_IP (default: las de ORCHESTRATOR_IP).
 LAUNCHER_PORT = int(_env_float("LAUNCHER_PORT", 9005))
 # Disparar con el resultado PARCIAL del reconocedor (apenas ve la frase) en
