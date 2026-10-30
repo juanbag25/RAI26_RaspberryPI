@@ -40,7 +40,7 @@ from collections import Counter
 
 import numpy as np
 
-ROOT_LOGS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "logs")
+ROOT_LOGS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
 
 
 def load(directory: str, days: float) -> list[dict]:

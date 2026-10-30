@@ -31,7 +31,7 @@ from __future__ import annotations
 import os
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import numpy as np
 import webrtcvad

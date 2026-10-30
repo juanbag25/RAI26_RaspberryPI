@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 
 from log import warn
 
-# Los knobs de tuning se pueden pisar desde linux/.env sin tocar código (útil
+# Los knobs de tuning se pueden pisar desde .env sin tocar código (útil
 # para calibrar en la Pi por SSH). main.py ya llama load_dotenv(); acá se
 # repite para que mic_level.py y cualquier script suelto vean lo mismo.
 load_dotenv()
@@ -484,7 +484,7 @@ SPEAKER_MEMORY = _env_str("SPEAKER_MEMORY", "on").lower()
 # Dónde se guarda (una subcarpeta por MIC_MODE y modelo: huellas de mics o
 # modelos distintos no son comparables).
 SPEAKER_DB_DIR = _env_str("SPEAKER_DB_DIR", "") or os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "..", "data", "speakers")
+    os.path.dirname(os.path.abspath(__file__)), "data", "speakers")
 # Reconocer al despertar: el «oye rai» (~1 s, huella ruidosa) contra los
 # perfiles. Alto a propósito: reconocer mal suma un perfil ajeno.
 SPEAKER_RECOGNIZE_SIM = _env_float("SPEAKER_RECOGNIZE_SIM", 0.55)
@@ -529,7 +529,7 @@ SPEAK_BARGE_RATIO = _env_float("SPEAK_BARGE_RATIO", 2.0)
 DOA_SPEAKER_SECTOR = _env_str("DOA_SPEAKER_SECTOR", "")
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-MODEL_PATH = os.path.join(_HERE, "..", "models", f"faster-whisper-{MODEL_SIZE}")
-WAKE_MODEL_PATH = os.path.join(_HERE, "..", "models", WAKE_MODEL_NAME)
-SILERO_MODEL_PATH = os.path.join(_HERE, "..", "models", SILERO_MODEL_NAME)
-SPEAKER_MODEL_PATH = os.path.join(_HERE, "..", "models", SPEAKER_MODEL_NAME)
+MODEL_PATH = os.path.join(_HERE, "models", f"faster-whisper-{MODEL_SIZE}")
+WAKE_MODEL_PATH = os.path.join(_HERE, "models", WAKE_MODEL_NAME)
+SILERO_MODEL_PATH = os.path.join(_HERE, "models", SILERO_MODEL_NAME)
+SPEAKER_MODEL_PATH = os.path.join(_HERE, "models", SPEAKER_MODEL_NAME)

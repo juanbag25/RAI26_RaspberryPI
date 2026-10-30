@@ -1,7 +1,7 @@
 """Calibración guiada del mic (y del ReSpeaker) en el lugar donde trabaja el robot.
 
 Va diciendo qué hacer en cada paso, mide, y al final escribe los valores en
-`linux/.env` (con backup del anterior y confirmación). Correrlo con el array
+`.env` (con backup del anterior y confirmación). Correrlo con el array
 YA MONTADO en el robot y en la sala real: los ángulos y ruidos dependen de eso.
 
     ./calibrate_stt.sh               # en la Pi: frena el servicio, calibra, lo levanta
@@ -456,7 +456,7 @@ def main() -> int:
         shutil.copy2(ENV_PATH, backup)
         say(f"Backup del .env anterior: {backup}")
     update_env(ENV_PATH, values)
-    say(f"Guardado. Reiniciá main.py para que tome los valores.")
+    say("Guardado. Reiniciá main.py para que tome los valores.")
     return 0
 
 

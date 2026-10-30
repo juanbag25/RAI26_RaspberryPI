@@ -59,7 +59,7 @@ class GroqTranscriber:
         # primera transcripción con un error poco claro. Avisar ya.
         import os
         if not os.getenv("GROQ_API_KEY"):
-            warn("STT", "GROQ_API_KEY no está definida (¿falta linux/.env?): "
+            warn("STT", "GROQ_API_KEY no está definida (¿falta el .env?): "
                  "toda transcripción va a fallar")
         self._client = Groq()
         # Métricas de Whisper de la última transcripción (main.py las pone en

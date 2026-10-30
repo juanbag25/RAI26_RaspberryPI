@@ -215,7 +215,7 @@ def persist(directory: str | None = None) -> str | None:
     global _sink
     if os.getenv("LOG_PERSIST", "1").strip().lower() in ("0", "false", "no", "off"):
         return None
-    root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "logs")
+    root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
     directory = directory or os.getenv("LOG_DIR", "").strip() or root
     try:
         keep = float(os.getenv("LOG_KEEP_DAYS", "") or 60)

@@ -13,4 +13,5 @@ logs/
 .vscode/
 .idea/
 .DS_Store
-Thumbs.db.env.bak-*
+Thumbs.db
+.env.bak-*

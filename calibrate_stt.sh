@@ -1,6 +1,6 @@
 #!/bin/bash
 # Calibración del mic en la Pi: frena el servicio del STT (que tiene el mic
-# abierto), corre linux/calibrate.py con la venv y vuelve a levantar el
+# abierto), corre calibrate.py con la venv y vuelve a levantar el
 # servicio al terminar, aunque se cancele con Ctrl+C. Los argumentos pasan
 # tal cual a calibrate.py (--dry-run, --yes, --seconds N).
 #
@@ -10,7 +10,7 @@ SERVICE="${STT_SERVICE:-rai26-stt}"
 cd "$(dirname "$(readlink -f "$0")")" || exit 1
 
 if [ ! -x .venv/bin/python ]; then
-    echo "✖ falta la venv en $(pwd)/.venv (ver linux/README.md, sección 3)"
+    echo "✖ falta la venv en $(pwd)/.venv (ver README.md, sección 3)"
     exit 1
 fi
 
@@ -29,4 +29,4 @@ cleanup() {
 }
 trap cleanup EXIT
 
-cd linux && ../.venv/bin/python calibrate.py "$@"
+.venv/bin/python calibrate.py "$@"

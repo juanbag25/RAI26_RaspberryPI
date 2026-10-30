@@ -2,8 +2,8 @@
 # Apuntar el STT de la Pi a OTRO orquestador (p. ej. tu PC por Tailscale) sin
 # tocar .env ni el servicio de producción.
 #
-#   ./linux/dev_orchestrator.sh <ip-o-hostname-tailscale>   # frena el servicio, corre main.py contra esa IP
-#   ./linux/dev_orchestrator.sh --restore                   # vuelve a levantar el servicio (Jetson)
+#   ./dev_orchestrator.sh <ip-o-hostname-tailscale>   # frena el servicio, corre main.py contra esa IP
+#   ./dev_orchestrator.sh --restore                   # vuelve a levantar el servicio (Jetson)
 #
 # Con Ctrl+C sale y, si el servicio estaba corriendo, lo vuelve a levantar solo.
 #
@@ -11,7 +11,7 @@
 #   1. Resuelve el destino (un hostname de Tailscale se traduce con `tailscale ip`).
 #   2. Frena lo que esté corriendo: el servicio systemd (STT_SERVICE, default
 #      "rai26-stt") si existe, y cualquier `main.py` suelto (tmux, nohup).
-#   3. Corre `python linux/main.py` en primer plano con ORCHESTRATOR_IP pisado
+#   3. Corre `python main.py` en primer plano con ORCHESTRATOR_IP pisado
 #      por variable de entorno (main.py hace load_dotenv() sin override, así
 #      que el .env no se toca). LAUNCHER_IP también: «rai, arriba» nunca
 #      arranca la Jetson en dev (si en la PC no corre launcher.py, queda como
@@ -23,8 +23,7 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT="$(dirname "$HERE")"
-# STT_SERVICE se puede fijar en linux/.env (STT_SERVICE=nombre-del-servicio).
+# STT_SERVICE se puede fijar en .env (STT_SERVICE=nombre-del-servicio).
 if [ -z "${STT_SERVICE:-}" ] && [ -f "$HERE/.env" ]; then
     STT_SERVICE="$(grep -E '^STT_SERVICE=' "$HERE/.env" | tail -n1 | cut -d= -f2- | tr -d '"' | tr -d "'" || true)"
 fi
@@ -50,7 +49,7 @@ stop_running() {
         sudo systemctl stop "$SERVICE"
     fi
     # main.py suelto (tmux, nohup, otra terminal), lanzado desde cualquier
-    # cwd: "python linux/main.py" o "python main.py". También mic_level.py y
+    # cwd ("python main.py" o con la ruta completa). También mic_level.py y
     # wake_spotter.py, que agarran el mic igual.
     local pids
     pids="$(pgrep -f 'python[0-9.]* .*(main|mic_level|wake_spotter)\.py' || true)"
@@ -84,7 +83,7 @@ stop_running() {
     if [ -n "$owner" ]; then
         printf '%s\n' "$owner" >&2
         die "el puerto ${CTRL_PORT} sigue ocupado por el proceso de arriba. Si es un servicio," \
-            "frenalo y/o poné su nombre: STT_SERVICE=<nombre> $0 ... (o en linux/.env)"
+            "frenalo y/o poné su nombre: STT_SERVICE=<nombre> $0 ... (o en .env)"
     fi
     # Mismo chequeo para el mic: si alguien lo tiene abierto, PortAudio no
     # lista ningún dispositivo y main.py muere con "Error querying device -1".
@@ -156,8 +155,8 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-cd "$ROOT"
+cd "$HERE"
 # shellcheck disable=SC1091
 [ -f .venv/bin/activate ] && source .venv/bin/activate
-log "corriendo linux/main.py contra $IP:$PORT (Ctrl+C para volver)"
-ORCHESTRATOR_IP="$IP" LAUNCHER_IP="$IP" python linux/main.py
+log "corriendo main.py contra $IP:$PORT (Ctrl+C para volver)"
+ORCHESTRATOR_IP="$IP" LAUNCHER_IP="$IP" python main.py

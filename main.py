@@ -25,7 +25,7 @@ from collections import deque
 
 import numpy as np
 
-from audio_capture import AudioFrame, LinuxAudioCapture
+from audio_capture import LinuxAudioCapture
 from battery import POWER_LOG_S, report_power
 from config import (
     ATTENTION_LEVEL_RATIO,
