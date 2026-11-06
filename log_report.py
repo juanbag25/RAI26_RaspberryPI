@@ -221,6 +221,41 @@ def main() -> None:
               + (", ".join(f"{k}={n}" for k, n in failed.most_common()) or "0"))
         print()
 
+    # --- wake (spotter) ----------------------------------------------------------
+    # Desde 2026-11-06: `spot` (lo que oyó Vosk) en cada frase y `level_src` en
+    # cada wake. Logs anteriores no los tienen.
+    wakes_ev = events(records, "wake")
+    asleep_utts = [s for s in stt if s.get("outcome") == "dormido"]
+    with_spot = [s for s in asleep_utts if "spot" in s]
+    named = [s for s in stt if s.get("woke") and not s.get("wake_prefix")]
+    if wakes_ev or with_spot or named:
+        print("== Wake (spotter Vosk)")
+        print(f"  wakes: {sum(1 for w in wakes_ev if w.get('accepted'))} aceptados, "
+              + ", ".join(f"{k}={n}" for k, n in Counter(
+                  w.get("reason") for w in wakes_ev if not w.get("accepted")).most_common())
+              + "; nivel tomado de: " + ", ".join(f"{k}={n}" for k, n in Counter(
+                  w.get("level_src", "?") for w in wakes_ev).most_common()))
+        if with_spot:
+            name_words = {"rai", "ray", "rey"}
+            casi = [s for s in with_spot
+                    if any(name_words & set(t.split()) or t.split()[:1] in (["oye"], ["o"], ["ose"])
+                           for t in s["spot"])]
+            print(f"  frases dormido con registro de Vosk: {len(with_spot)}; "
+                  f"oyó algo parecido al wake sin disparar: {len(casi)}")
+            for s in casi[-8:]:
+                print(f"    nivel={s.get('level')} {s.get('audio_s')}s oyó={s['spot']} clip={s.get('clip')}")
+        if named:
+            missed = [s for s in named if not s.get("spot") or not any(
+                ("oye" in t or "sea" in t) and ("ray" in t or "rai" in t or "rey" in t)
+                for t in s.get("spot", []))]
+            print(f"  despierto, Whisper oyó el nombre sin marca del spotter: {len(named)}"
+                  + (f" (con `spot`: {sum(1 for s in named if 'spot' in s)}, el spotter no lo "
+                     f"reconoció en {sum(1 for s in missed if 'spot' in s)})"
+                     if any("spot" in s for s in named) else ""))
+            for s in named[-6:]:
+                print(f"    «{s.get('text')}» oyó={s.get('spot')} clip={s.get('clip')}")
+        print()
+
     # --- voz -------------------------------------------------------------------
     judged = [s for s in stt if s.get("spk_sim") is not None]
     # Umbral dinámico: el de cada frase (spk_th); logs viejos, el fijo de entonces.

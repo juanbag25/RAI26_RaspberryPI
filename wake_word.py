@@ -56,6 +56,13 @@ _PUNCT_KEEP = "0123456789abcdefghijklmnopqrstuvwxyz "
 # confirmó. NO están en WAKE_WORDS porque, para despertar por texto, "rey"
 # suelto daría falsos positivos.
 _WAKE_LOOKALIKES = {"rey", "rei", "rail"}
+# Muletillas que van con el nombre y no son una orden: «oye», y como Whisper
+# transcribe a veces el «oye» («O sea, RAI», «Ose, RAI», «¡Ocho, RAI!»). Con el
+# nombre al FINAL («Saludá, RAI») lo que viene antes es la orden, salvo que
+# sea sólo esto.
+_WAKE_FILLERS = {"oye", "oi", "oe", "ey", "hey", "ei", "eh", "ah", "o", "sea", "ose",
+                 "osha", "ocho", "che", "hola", "se", "y", "a", "bueno", "vamos", "ok",
+                 "okey", "dale"}
 
 
 def normalize(text: str) -> str:
@@ -247,6 +254,23 @@ class WakeWord:
                 return end - 1
         return None
 
+    @staticmethod
+    def _before_name(text: str, words: list[str], owners: list[int], index: int) -> str:
+        """Lo que se dijo ANTES del nombre, sin las muletillas de las puntas
+        («Oye, saludá, RAI» -> «saludá»). "" si no había más que muletillas."""
+        if all(w in _WAKE_FILLERS for w in words[:index]):
+            return ""
+        tokens = text.split()[:owners[index]]
+
+        def filler(token: str) -> bool:
+            return all(w in _WAKE_FILLERS for w in normalize(token).split())
+
+        while tokens and filler(tokens[-1]):
+            tokens.pop()
+        while tokens and filler(tokens[0]):
+            tokens.pop(0)
+        return " ".join(tokens).strip(" ,.;:-—¡!¿?")
+
     def says_name(self, text: str) -> bool:
         """¿La frase empieza llamándolo («rai, ...»)? Sin tocar el estado."""
         return WAKE_WORD_ENABLED and self._find(self._tokenize(text)[0]) is not None
@@ -302,6 +326,10 @@ class WakeWord:
         # Sacar el nombre y lo que venga antes ("che rai, vení" -> "vení"):
         # al LLM le llega la instrucción sola.
         rest = " ".join(text.split()[owners[index] + 1:]).lstrip(" ,.;:-—").strip()
+        if not rest:
+            # Nombre al final: «Saludá, RAI» / «Parate, RAI». La orden es lo
+            # de antes (antes se tiraba y sólo despertaba, 2026-11-06).
+            rest = self._before_name(text, words, owners, index)
         # Despierta y se engancha al nivel de esta frase (trae la instrucción).
         # El «Sí, dime» sólo si vino el nombre solo: con instrucción, la
         # respuesta del robot ya es la confirmación (y un `awake` llegando

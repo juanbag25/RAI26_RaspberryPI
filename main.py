@@ -70,6 +70,7 @@ from mix_trim import MixContext, MixTrimmer, doa_by_segment
 from respeaker import ReSpeaker
 from speaker_id import SpeakerLock, load_embedder, load_memory
 from vad import VoiceActivityDetector
+from wake_clips import WakeClips
 from wake_word import WakeWord, normalize
 
 if BACKEND == "groq":
@@ -302,6 +303,7 @@ def transcribe_worker(
     speaker: SpeakerLock,
     text_wake: bool,
     launch: LaunchRequest,
+    clips: WakeClips,
 ) -> None:
     """Consume utterances cerradas por el VAD y hace el trabajo lento (STT +
     red) fuera del hilo de captura de audio.
@@ -334,11 +336,14 @@ def transcribe_worker(
         # wake_prefix: la frase empieza con el «oye rai» que oyó el spotter
         # (la persona siguió hablando sin esperar el «Sí, dime»).
         # mix: contexto para recortar frases mezcladas (MIX_TRIM_ENABLED).
-        audio, level, queued_at, wake_prefix, mix = item
+        # spot: lo que fue oyendo Vosk durante la frase (wake_spotter.take_heard).
+        audio, level, queued_at, wake_prefix, mix, spot = item
         age = time.monotonic() - queued_at
         seconds = len(audio) / 16000.0
         rec.update(audio_s=round(seconds, 2), level=round(level, 5), age_s=round(age, 2),
                    wake_prefix=wake_prefix, awake=wake.is_awake())
+        if spot:
+            rec["spot"] = spot
         if age > MAX_QUEUE_AGE_S:
             counters.dropped_stale += 1
             drop("STT", "vieja en cola", edad_s=f"{age:.1f}", nivel=level)
@@ -443,6 +448,11 @@ def transcribe_worker(
             # despierto): su voz es la nueva referencia.
             speaker.lock(audio)
             rec["woke"] = True
+            if not wake_prefix:
+                # Whisper oyó el nombre: muestra para medir el spotter (si
+                # `spot` no trae la frase, Vosk no la reconoció).
+                rec["clip"] = clips.save(audio, "nombre", spot=spot, text=text,
+                                         level=round(level, 5))
         elif payload and trimmed is None:
             # Para la memoria de voces sólo cuenta lo bien verificado: la
             # frase del wake o una aceptada con similitud alta.
@@ -961,10 +971,11 @@ def main() -> None:
     # transcribe_worker): son las dos operaciones lentas/bloqueantes del
     # pipeline y no deben frenar la lectura del stream de audio.
     audio_queue: "queue.Queue" = queue.Queue()
+    clips = WakeClips()
     worker = threading.Thread(
         target=transcribe_worker,
         args=(audio_queue, transcriber, wake, orchestrator, counters,
-              speaker, spotter is None, launch),
+              speaker, spotter is None, launch, clips),
         daemon=True,
     )
     worker.start()
@@ -1003,9 +1014,16 @@ def main() -> None:
         referencia (orden de corte: el audio trae la voz del robot).
         `level`: nivel de quien habló, si el VAD no lo sabe. Muteado el VAD no
         recibe frames y su nivel es 0: sin esto, un «oye rai» de corte nunca
-        pasaba el filtro de traspaso (2026-10-16, ver changelog.py)."""
+        pasaba el filtro de traspaso (2026-10-16, ver changelog.py).
+        Sin `level` y sin frase abierta en el VAD (el spotter disparó antes de
+        que abriera, o justo después de que cerrara) se usa el p90 del RMS del
+        último ~1.5 s: antes quedaba en 0 y el traspaso se rechazaba siempre
+        como «lejano» (2026-11-06, los 12 wakes rechazados del 22/10 al 30/10)."""
+        level_src = "dado"
         if level is None:
-            level = vad.current_level()
+            level, level_src = vad.current_level(), "vad"
+            if level <= 0 and recent_rms:
+                level, level_src = float(np.percentile(recent_rms, 90)), "reciente"
         reading = spatial.reading(now - WAKE_DOA_WINDOW_S, now)
         if spatial.enabled and reading.n >= 2 and reading.blocked >= 0.6:
             drop("WAKE", f"«{heard}» desde un sector de ruido del robot",
@@ -1024,13 +1042,16 @@ def main() -> None:
                 drop("WAKE", f"otro «{heard}» pero lejano: no cambio el foco",
                      nivel=level, umbral=near, dir=_deg(reading.direction))
                 event("wake", heard=heard, accepted=False, reason="traspaso_lejano",
-                      level=round(level, 5), near=round(near, 5))
+                      level=round(level, 5), level_src=level_src, near=round(near, 5))
                 return False
         event("wake", heard=heard, accepted=True, was_awake=wake.is_awake(),
-              level=round(level, 5), near=round(vad.near_threshold(), 5),
+              level=round(level, 5), level_src=level_src, near=round(vad.near_threshold(), 5),
               noise=round(vad.noise_floor, 5), in_speech=vad.in_speech,
               voice_s=None if voice is None else round(len(voice) / 16000.0, 2),
               dir=reading.direction if spatial.enabled else None)
+        if voice is not None:
+            clips.save(voice, "wake", spot=[heard], level=round(level, 5),
+                       was_awake=wake.is_awake())
         old_focus = spatial.focus.focus
         wake.wake_from_audio(announce=announce)
         if voice is not None:
@@ -1074,6 +1095,9 @@ def main() -> None:
     # Último ~1.5 s de audio: huella del «oye rai» si el spotter dispara con
     # la utterance ya cerrada (si está abierta, se usa la utterance).
     recent_pcm: deque[bytes] = deque(maxlen=int(1500 / FRAME_MS))
+    # RMS de esos mismos frames: nivel del «oye rai» cuando el VAD no tiene
+    # la frase abierta (handle_wake).
+    recent_rms: deque[float] = deque(maxlen=int(1500 / FRAME_MS))
 
     try:
         first_frame = True
@@ -1154,6 +1178,7 @@ def main() -> None:
                 continue
             was_muted = False
             recent_pcm.append(frame)
+            recent_rms.append(af.rms if af.rms is not None else vad.frame_rms(frame))
             if spotter is not None:
                 spotter.feed(frame)
                 heard = spotter.take_detection()
@@ -1190,7 +1215,10 @@ def main() -> None:
                         else:
                             ack_pending_t = None
                             wake.announce()
+            opened_before = vad.in_speech
             closed, audio = vad.process_frame(frame, af.rms, af.t)
+            if spotter is not None and vad.in_speech and not opened_before:
+                spotter.take_heard()  # arranca una frase: lo de antes no es de ella
             if ack_pending_t is not None:
                 if closed or not vad.in_speech:
                     # Se cerró antes de decidir: era sólo el nombre.
@@ -1223,14 +1251,16 @@ def main() -> None:
                     wake.announce()
             if closed and audio is not None:
                 level = vad.last_level
+                spot = spotter.take_heard() if spotter is not None else []
                 # Modo audio: dormido no se transcribe nada. Sólo el spotter
                 # escucha, y hasta que no oiga "oye rai" Groq no se entera.
                 if spotter is not None and not wake.is_awake():
                     counters.asleep += 1
                     drop("WAKE", f"dormido: no transcribo hasta oír «{WAKE_PHRASES[0]}»",
                          nivel=level)
+                    clip = clips.save(audio, "dormido", spot=spot, level=round(level, 5))
                     event("stt", outcome="dormido", level=round(level, 5),
-                          audio_s=round(len(audio) / 16000.0, 2))
+                          audio_s=round(len(audio) / 16000.0, 2), spot=spot, clip=clip)
                     continue
                 # Recorte de frases mezcladas: la dirección por tramo se lee
                 # ahora, mientras las lecturas siguen en el buffer del array.
@@ -1274,7 +1304,7 @@ def main() -> None:
                           min_level=round(wake.min_level(), 5),
                           audio_s=round(len(audio) / 16000.0, 2))
                     continue
-                audio_queue.put((audio, level, time.monotonic(), wake_prefix, mix))
+                audio_queue.put((audio, level, time.monotonic(), wake_prefix, mix, spot))
 
     except KeyboardInterrupt:
         if exit_reason == "fin":

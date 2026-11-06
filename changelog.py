@@ -12,6 +12,37 @@ log (un descarte nuevo, un evento nuevo, un umbral con otro significado).
 
 CHANGES: list[dict] = [
     {
+        "id": "wake-clips-spot",
+        "date": "2026-11-06",
+        "what": "Instrumentación del wake: cada frase lleva `spot` (lo que oyó Vosk "
+                "durante ella) y se guardan clips .wav en data/wake_clips "
+                "(wake_clips.py, WAKE_CLIPS_KEEP=300; tags dormido | wake | nombre), "
+                "con `clip` en el evento stt. log_report.py: sección «Wake».",
+    },
+    {
+        "id": "wake-match-anywhere",
+        "date": "2026-11-06",
+        "what": "El spotter reconoce la frase en CUALQUIER lugar del resultado de "
+                "Vosk (gana la de más a la izquierda), no sólo al final: «oye rai, "
+                "sentate» salía «oye ray frena» y no despertaba (y disparaba el "
+                "freno). WAKE_PHRASES suma «o sea rai/ray», «oe ray», «oi ray», "
+                "«ose ray».",
+    },
+    {
+        "id": "wake-orden-antes-del-nombre",
+        "date": "2026-11-06",
+        "what": "«Saludá, RAI» / «Parate, RAI»: con el nombre al final se manda lo de "
+                "antes (sin muletillas) en vez de tirarlo como `filtrada_wake`.",
+    },
+    {
+        "id": "traspaso-nivel-reciente",
+        "date": "2026-11-06",
+        "what": "«oye rai» estando despierto con el VAD sin frase abierta: el nivel "
+                "del traspaso es el p90 del RMS del último 1.5 s (antes 0 → "
+                "rechazo `traspaso_lejano` siempre). Campo nuevo `level_src` en el "
+                "evento wake (vad | reciente | dado).",
+    },
+    {
         "id": "launch-es-reinicio",
         "date": "2026-10-23",
         "what": "«rai arriba» con el stack levantado ya no vale como «oye rai»: el "

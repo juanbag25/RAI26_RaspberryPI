@@ -333,7 +333,12 @@ WAKE_MODE = _env_str("WAKE_MODE", "audio").lower()
 # "rai" no es palabra del español y el modelo suele escucharlo como "ray" o
 # "rey": por eso están las tres. Agregá variantes con el prefijo que uses
 # ("hola rai", "che rai") en .env: WAKE_PHRASES=oye rai,oye ray,hola rai
-WAKE_PHRASES = _env_list("WAKE_PHRASES", ("oye rai", "oye ray", "oye rey"))
+# Las de «o sea / oe / oi / ose» (2026-11-06): así transcribe Whisper el «oye»
+# dicho rápido («O sea, RAI», «Ose, RAI») y en esos casos el spotter a veces no
+# disparaba. Todas las palabras están en el vocabulario del modelo chico.
+WAKE_PHRASES = _env_list("WAKE_PHRASES", ("oye rai", "oye ray", "oye rey",
+                                          "o sea rai", "o sea ray", "oe ray",
+                                          "oi ray", "ose ray"))
 # Arranque por voz (launch_request.py): con el robot prendido pero el stack
 # sin levantar, estas frases le piden al launcher de la Jetson
 # (orchestrator/launcher.py, LAUNCHER_PORT) que corra start_orchestrator.sh.
@@ -533,3 +538,12 @@ MODEL_PATH = os.path.join(_HERE, "models", f"faster-whisper-{MODEL_SIZE}")
 WAKE_MODEL_PATH = os.path.join(_HERE, "models", WAKE_MODEL_NAME)
 SILERO_MODEL_PATH = os.path.join(_HERE, "models", SILERO_MODEL_NAME)
 SPEAKER_MODEL_PATH = os.path.join(_HERE, "models", SPEAKER_MODEL_NAME)
+
+# Clips de audio para ajustar el wake word (wake_clips.py): frases cercanas
+# dormido (¿«oye rai» perdidos?), lo que disparó el spotter y las frases donde
+# Whisper oyó el nombre. Se guardan los últimos WAKE_CLIPS_KEEP en
+# WAKE_CLIPS_DIR (sólo en la Pi, data/ no se versiona); 0 = apagado. Frases de
+# más de WAKE_CLIPS_MAX_S no se guardan (un «oye rai» dura ~1 s).
+WAKE_CLIPS_KEEP = int(_env_float("WAKE_CLIPS_KEEP", 300))
+WAKE_CLIPS_MAX_S = _env_float("WAKE_CLIPS_MAX_S", 4.0)
+WAKE_CLIPS_DIR = _env_str("WAKE_CLIPS_DIR", "") or os.path.join(_HERE, "data", "wake_clips")

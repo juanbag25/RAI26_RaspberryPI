@@ -15,7 +15,7 @@ no es una palabra del español: suele salir "ray"/"rey", por eso esas variantes
 están en la gramática), pero para "despertá cuando suene a 'oye rai'" alcanza.
 
 El match se hace sobre los resultados PARCIALES (WAKE_ON_PARTIAL): apenas el
-decoder ve la frase completa dispara, sin esperar a que cierre la utterance.
+decoder ve la frase completa (en cualquier lugar del texto) dispara, sin esperar a que cierre la utterance.
 Después resetea el reconocedor y espera WAKE_COOLDOWN_S para no disparar dos
 veces por la misma frase (parcial + final).
 
@@ -104,6 +104,7 @@ class WakeSpotter:
                       if normalize(p) and normalize(p) not in taken}
         self._launch_phrases = tuple(launch_raw)
         self._phrases = taken + self._launch_phrases
+        self._phrases_by_len = sorted((p.split() for p in self._phrases), key=len, reverse=True)
         grammar = json.dumps(list(taken) + list(launch_raw.values()) + ["[unk]"],
                              ensure_ascii=False)
 
@@ -120,6 +121,10 @@ class WakeSpotter:
         self._stats = SpotterStats()
         self._detected = threading.Event()
         self._detected_text = ""
+        # Lo que fue devolviendo Vosk (parciales/finales distintos de "[unk]")
+        # desde el último `take_heard()`: main.py lo loguea con cada frase
+        # cerrada para ver por qué no disparó un «oye rai» (casi: «oye [unk]»).
+        self._heard: list[str] = []
         # Cooldown en TIEMPO DE AUDIO (frames procesados), no de reloj: así
         # es determinista y no depende de si el decoder va atrasado.
         self._frames_done = 0
@@ -157,6 +162,14 @@ class WakeSpotter:
         """¿La detección `text` fue una frase de arranque («rai arriba»)?"""
         return self._matches(text) in self._launch_phrases
 
+    def take_heard(self, max_items: int = 4) -> list[str]:
+        """Textos que oyó Vosk desde la última llamada (los últimos
+        `max_items`, sin repetir seguidos) y vacía la lista. Aproximado: el
+        decoder corre en su hilo y puede ir unos frames atrasado."""
+        with self._lock:
+            heard, self._heard = self._heard, []
+        return heard[-max_items:]
+
     def pop_stats(self) -> SpotterStats:
         with self._lock:
             stats, self._stats = self._stats, SpotterStats(last_text=self._stats.last_text)
@@ -189,10 +202,21 @@ class WakeSpotter:
                 err("SPOT", f"{type(exc).__name__}: {exc}")
 
     def _matches(self, text: str) -> str | None:
-        n = normalize(text)
-        for phrase in self._phrases:
-            if n == phrase or n.endswith(" " + phrase):
-                return phrase
+        """Frase de la gramática que aparece en `text` (la de más a la izquierda).
+
+        En CUALQUIER posición, no sólo al final: con gramática, Vosk igual
+        encadena palabras del vocabulario, y «oye rai, sentate» puede salir
+        como «oye ray frena» o «oye ray [unk]» sin pasar nunca por el parcial
+        «oye ray» (probado con audio sintético, 2026-11-06). Antes se exigía
+        que el texto TERMINARA con la frase: ese wake se perdía y, peor, el
+        final «ray frena» disparaba el FRENO. Gana la que empieza antes; a
+        igual inicio, la más larga.
+        """
+        words = normalize(text).split()
+        for i in range(len(words)):
+            for phrase in self._phrases_by_len:
+                if words[i:i + len(phrase)] == phrase:
+                    return " ".join(phrase)
         return None
 
     def _check(self, text: str, *, final: bool) -> None:
@@ -202,6 +226,9 @@ class WakeSpotter:
             if text != self._stats.last_text:
                 self._stats.last_text = text
                 dbg(f"{'final' if final else 'parcial'}: «{text}»", "SPOT")
+            if not self._heard or self._heard[-1] != text:
+                self._heard.append(text)
+                del self._heard[:-16]
         phrase = self._matches(text)
         if phrase is None:
             return

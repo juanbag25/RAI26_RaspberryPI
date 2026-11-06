@@ -21,6 +21,7 @@ mic → audio_capture / respeaker → vad (+ silero) → wake_spotter / wake_wor
 | `audio_capture.py`, `respeaker.py`, `doa.py` | Captura (ALSA `plughw`), control del array (DSP, LEDs) y dirección de llegada |
 | `vad.py`, `silero_vad.py` | Detección de voz y corte de frases |
 | `wake_spotter.py`, `wake_word.py` | Wake word por audio (Vosk) o sobre el texto; órdenes de corte y de freno |
+| `wake_clips.py` | Clips de audio de wakes y frases dormido para ajustar el spotter |
 | `speaker_id.py`, `speaker_memory.py`, `mix_trim.py` | Huella de voz, memoria de voces y recorte de frases mezcladas |
 | `transcriber.py`, `groq_transcriber.py` | Backends de STT (`BACKEND` en `config.py`) |
 | `ctrl_server.py`, `launch_request.py` | Mute del mic desde el orquestador; «rai, arriba» / «rai, reinicia» |
@@ -31,7 +32,7 @@ mic → audio_capture / respeaker → vad (+ silero) → wake_spotter / wake_wor
 
 Carpetas locales (gitignored, se crean en la Pi): `.venv/`, `.env`,
 `models/` (Whisper / Vosk / Silero / speaker), `data/speakers/` (memoria de
-voces) y `logs/`.
+voces), `data/wake_clips/` (clips del wake) y `logs/`.
 
 ## Hardware
 
@@ -584,7 +585,10 @@ NET   ✓ enviado «Vení para acá.» (0.01s)
 - La frase de wake tiene que sonar *parecido*, no exacto: Vosk sólo puede
   devolver una de `WAKE_PHRASES` o `[unk]`, así que "hola rai" también suele
   disparar como "oye ray". "rai" no es palabra del español y sale como
-  "ray"/"rey"; por eso las tres variantes están en el default.
+  "ray"/"rey"; por eso las tres variantes están en el default. También
+  «o sea rai», «oe/oi/ose ray»: así sale el «oye» dicho rápido.
+- La frase se busca en **cualquier lugar** del resultado de Vosk, no sólo al
+  final: con gramática, «oye rai, sentate» puede salir «oye ray frena».
 - Decir "oye rai" mientras ya está despierto re-engancha el foco a quien lo
   dijo (y el robot contesta «Sí, dime» otra vez): otra persona puede tomar la
   palabra sin esperar a que se duerma.
@@ -594,7 +598,17 @@ NET   ✓ enviado «Vení para acá.» (0.01s)
   fijada y `stop` (orden de corte). Todo lo que suena manda
   `SPEAK_START`/`SPEAK_END`, así el mic no se escucha a sí mismo.
 - El texto que llega a Groq después del wake pasa igual por el filtro de
-  texto de abajo: si Whisper escribe "rai vení" se recorta a "vení".
+  texto de abajo: si Whisper escribe "rai vení" se recorta a "vení". Con el
+  nombre al final («Saludá, RAI») se manda lo de antes («Saludá»).
+
+**Clips para medir el spotter** ([`wake_clips.py`](wake_clips.py)): se guardan
+en `data/wake_clips/` los últimos `WAKE_CLIPS_KEEP` (300; 0 = apagado) audios
+de frases cercanas dormido (`_dormido.wav`, ¿un «oye rai» que Vosk no
+reconoció?), de cada wake (`_wake.wav`) y de las frases donde Whisper oyó el
+nombre despierto (`_nombre.wav`), más `clips.jsonl` con lo que oyó Vosk
+(`spot`). El evento `stt` del log trae `spot` y `clip`; `log_report.py` los
+resume en la sección «Wake». Para escuchar uno desde la PC:
+`scp rai26@10.2.69.200:RAI26_RaspberryPI/data/wake_clips/<archivo>.wav .`
 
 ### Arranque por voz: «rai, arriba»
 
