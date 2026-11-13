@@ -189,6 +189,18 @@ class OrchestratorLink:
     def describe(self) -> str:
         return ", ".join(f"{h}:{self.port}" for h in self.hosts)
 
+    def probe(self) -> bool:
+        """¿Contesta el orquestador? Prueba todas las IPs ignorando el
+        backoff, con un evento que el orquestador ignora (`ping`). Lo usa
+        launch_request.py para no reiniciar un stack que ya corre."""
+        for ip in [self._current] + [h for h in self.hosts if h != self._current]:
+            if send_to_orchestrator(ORCH_EVENT_PREFIX + "ping", ip, self.port, quiet=True):
+                with self._lock:
+                    self._down_until = 0.0
+                    self._current = ip
+                return True
+        return False
+
     def reset_backoff(self) -> None:
         """El orquestador acaba de levantar: reintentar ya."""
         with self._lock:
@@ -918,7 +930,8 @@ def main() -> None:
 
     launch = LaunchRequest([h.strip() for h in launcher_ip.split(",") if h.strip()],
                            LAUNCHER_PORT, LAUNCH_PHRASES if WAKE_WORD_ENABLED else (),
-                           on_starting=wake.sleep, on_ready=on_launch_ready)
+                           on_starting=wake.sleep, on_ready=on_launch_ready,
+                           is_up=orchestrator.probe)
     start_in_background(CTRL_PORT, mute, handlers={"ORCH_READY": launch.ready,
                                                    "LAUNCH_FAILED": launch.failed})
     orchestrator.on_reply_expected = mute.expect_reply

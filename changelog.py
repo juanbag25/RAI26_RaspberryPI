@@ -12,6 +12,15 @@ log (un descarte nuevo, un evento nuevo, un umbral con otro significado).
 
 CHANGES: list[dict] = [
     {
+        "id": "launch-solo-caido",
+        "date": "2026-11-13",
+        "what": "«rai arriba» sólo arranca el stack si el orquestador no contesta "
+                "(la Pi lo prueba con `@@event:ping` antes de llamar al launcher); "
+                "si contesta vale como «oye rai» (evento launch reply=UP). "
+                "LAUNCH_PHRASES queda en «rai/ray/rey arriba»: se sacan «levántate» "
+                "y «reinicia» («RAI, sentate» salía «rai levántate» y reiniciaba todo).",
+    },
+    {
         "id": "wake-clips-spot",
         "date": "2026-11-06",
         "what": "Instrumentación del wake: cada frase lleva `spot` (lo que oyó Vosk "

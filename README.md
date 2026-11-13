@@ -613,13 +613,17 @@ resume en la sección «Wake». Para escuchar uno desde la PC:
 ### Arranque por voz: «rai, arriba»
 
 Con el robot prendido pero el stack de la Jetson sin levantar, **«rai,
-arriba»** o **«rai, levántate»** (`LAUNCH_PHRASES`, en la gramática del
-spotter; en modo `text`, en la transcripción) le piden al launcher de la
+arriba»** (`LAUNCH_PHRASES`, en la gramática del spotter; en modo `text`, en
+la transcripción) le pide al launcher de la
 Jetson (`R-AI-026/orchestrator/launcher.py`, `LAUNCHER_IP`:`LAUNCHER_PORT`,
 default las IPs de `ORCHESTRATOR_IP` y 9005) que corra
 `start_orchestrator.sh` ([`launch_request.py`](launch_request.py)). Mientras
 arranca la Pi vuelve a dormirse; si el preflight falla el robot lo dice por
-su parlante. Si el orquestador ya corre, la frase vale como un «oye rai».
+su parlante. **Antes de llamar al launcher la Pi prueba el orquestador**
+(`@@event:ping`): si contesta, no se llama al launcher y la frase vale como un
+«oye rai» (evento `launch` con reply `UP`). Así nunca reinicia un stack que
+anda: «RAI, sentate» mal oído como «rai levántate» lo reiniciaba (por eso ya
+no hay «levántate» ni «reinicia» entre las frases).
 `dev_orchestrator.sh` apunta también `LAUNCHER_IP` a tu PC: en dev nunca
 arranca la Jetson. En el log persistente: eventos `launch` y `launch_done`.
 

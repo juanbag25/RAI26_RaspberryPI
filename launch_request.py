@@ -2,14 +2,18 @@
 
 La Pi corre siempre (servicio rai26-stt), aunque el orquestador no esté. Al
 oír una frase de LAUNCH_PHRASES (spotter de audio; en WAKE_MODE=text, en el
-texto) se le pide el arranque al launcher de la Jetson
+texto) primero se prueba el orquestador (`is_up`, un `@@event:ping`): si
+contesta, el stack ya corre y la frase vale como «oye rai» (evento `launch`
+con reply `UP`), sin tocar el launcher. Sólo si no contesta se le pide el
+arranque al launcher de la Jetson
 (R-AI-026/orchestrator/launcher.py, LAUNCHER_PORT, mismo protocol
 length-prefixed). Contesta:
 
     STARTING / BUSY -> arranca (o ya estaba arrancando): la Pi vuelve a
                        dormirse; no hay orquestador que conteste «Sí, dime».
-                       Con el stack ya levantado, el launcher lo REINICIA
-                       entero («Reiniciando sistemas»): también es STARTING.
+                       (El launcher, si el stack corre, lo REINICIA entero;
+                       por eso la Pi ya no lo llama con el stack arriba:
+                       «RAI, sentate» mal oído reiniciaba todo, 2026-11-13.)
     RUNNING         -> (launcher viejo) el orquestador ya corre: la frase
                        vale como «oye rai».
 
@@ -59,12 +63,14 @@ def _recv_exact(conn: socket.socket, n: int) -> bytes | None:
 class LaunchRequest:
     def __init__(self, hosts: list[str], port: int, phrases: tuple[str, ...],
                  on_starting: Callable[[], None] | None = None,
-                 on_ready: Callable[[], None] | None = None) -> None:
+                 on_ready: Callable[[], None] | None = None,
+                 is_up: Callable[[], bool] | None = None) -> None:
         self.hosts = hosts
         self.port = port
         self._phrases = tuple(p for p in (normalize(p) for p in phrases) if p)
         self._on_starting = on_starting
         self._on_ready = on_ready
+        self._is_up = is_up
         self._lock = threading.Lock()
         self._in_flight = False
         self._settled = threading.Event()  # sin pedido al launcher en vuelo
@@ -115,7 +121,10 @@ class LaunchRequest:
 
     def _run(self, heard: str) -> None:
         try:
-            host, reply = self._ask()
+            if self._is_up is not None and self._is_up():
+                host, reply = None, "UP"
+            else:
+                host, reply = self._ask()
             if reply in ("STARTING", "BUSY"):
                 self._starting_at = time.monotonic()
         finally:
@@ -123,7 +132,9 @@ class LaunchRequest:
                 self._in_flight = False
             self._settled.set()
         event("launch", heard=heard, host=host, reply=reply)
-        if reply is None:
+        if reply == "UP":
+            dim("LAUNCH", f"«{heard}»: el orquestador contesta, no reinicio nada; vale como «oye rai»")
+        elif reply is None:
             warn("LAUNCH", f"«{heard}»: no contestó ningún launcher ({self.describe()}); "
                  "si el orquestador corre, vale como «oye rai»")
         elif reply == "RUNNING":
