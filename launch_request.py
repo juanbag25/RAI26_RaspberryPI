@@ -3,8 +3,9 @@
 La Pi corre siempre (servicio rai26-stt), aunque el orquestador no esté. Al
 oír una frase de LAUNCH_PHRASES (spotter de audio; en WAKE_MODE=text, en el
 texto) primero se prueba el orquestador (`is_up`, un `@@event:ping`): si
-contesta, el stack ya corre y la frase vale como «oye rai» (evento `launch`
-con reply `UP`), sin tocar el launcher. Sólo si no contesta se le pide el
+contesta, el stack ya corre: no se toca el launcher y la frase es la orden
+de pararse (`on_up`: main.py le manda LAUNCH_UP_ORDER al orquestador, sin
+«Sí, dime»; evento `launch` con reply `UP`). Sólo si no contesta se le pide el
 arranque al launcher de la Jetson
 (R-AI-026/orchestrator/launcher.py, LAUNCHER_PORT, mismo protocol
 length-prefixed). Contesta:
@@ -64,13 +65,15 @@ class LaunchRequest:
     def __init__(self, hosts: list[str], port: int, phrases: tuple[str, ...],
                  on_starting: Callable[[], None] | None = None,
                  on_ready: Callable[[], None] | None = None,
-                 is_up: Callable[[], bool] | None = None) -> None:
+                 is_up: Callable[[], bool] | None = None,
+                 on_up: Callable[[str], None] | None = None) -> None:
         self.hosts = hosts
         self.port = port
         self._phrases = tuple(p for p in (normalize(p) for p in phrases) if p)
         self._on_starting = on_starting
         self._on_ready = on_ready
         self._is_up = is_up
+        self._on_up = on_up
         self._lock = threading.Lock()
         self._in_flight = False
         self._settled = threading.Event()  # sin pedido al launcher en vuelo
@@ -108,8 +111,10 @@ class LaunchRequest:
         started = self._starting_at
         return started is not None and time.monotonic() - started < STARTING_MAX_S
 
-    def request(self, heard: str) -> None:
-        """Pide el arranque en un hilo aparte (no frena el loop de captura)."""
+    def request(self, heard: str, order_on_up: bool = True) -> None:
+        """Pide el arranque en un hilo aparte (no frena el loop de captura).
+        `order_on_up`: si el stack ya anda, llamar a `on_up` (la Pi manda la
+        orden de pararse); False en modo texto, donde la frase ya va al LLM."""
         if not self.enabled:
             return
         with self._lock:
@@ -117,9 +122,10 @@ class LaunchRequest:
                 return
             self._in_flight = True
             self._settled.clear()
-        threading.Thread(target=self._run, args=(heard,), name="launch", daemon=True).start()
+        threading.Thread(target=self._run, args=(heard, order_on_up), name="launch",
+                         daemon=True).start()
 
-    def _run(self, heard: str) -> None:
+    def _run(self, heard: str, order_on_up: bool = True) -> None:
         try:
             if self._is_up is not None and self._is_up():
                 host, reply = None, "UP"
@@ -133,7 +139,9 @@ class LaunchRequest:
             self._settled.set()
         event("launch", heard=heard, host=host, reply=reply)
         if reply == "UP":
-            dim("LAUNCH", f"«{heard}»: el orquestador contesta, no reinicio nada; vale como «oye rai»")
+            dim("LAUNCH", f"«{heard}»: el orquestador contesta, no reinicio nada; es la orden de pararse")
+            if order_on_up and self._on_up is not None:
+                self._on_up(heard)
         elif reply is None:
             warn("LAUNCH", f"«{heard}»: no contestó ningún launcher ({self.describe()}); "
                  "si el orquestador corre, vale como «oye rai»")

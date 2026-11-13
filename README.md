@@ -496,7 +496,7 @@ menor impacto:
 
 Por default, mientras el robot habla el mic se descarta entero
 (`SPEAK_LISTEN_MODE=mute`). Con `SPEAK_LISTEN_MODE=keyword` el spotter sigue
-escuchando **sólo** «para rai» / «basta rai» (`SPEAK_STOP_PHRASES`) o «oye
+escuchando **sólo** «basta rai» (`SPEAK_STOP_PHRASES`) o «oye
 rai»: si viene de fuera del sector del parlante (`DOA_SPEAKER_SECTOR`, se mide
 con `mic_level.py --doa` mientras el robot habla) y suena `SPEAK_BARGE_RATIO`
 veces más fuerte que el parlante, le manda `stop` al orquestador, que se calla
@@ -553,6 +553,30 @@ código, desde `.env`:
 NEAR_RMS_THRESHOLD=0.07
 NEAR_SNR_RATIO=3
 ```
+
+## Frases del robot: una forma de decir cada cosa
+
+Para que no se confundan entre sí (Vosk y Whisper confunden «parate»/«pará»,
+«sentate»/«levántate»), cada intención tiene **una** frase (2026-11-13):
+
+| Querés que… | Decí | Quién la resuelve |
+|---|---|---|
+| te escuche | «oye rai» | Pi (spotter) → «Sí, dime» |
+| frene | **«rai, frena»** | Pi (spotter) → `brake`, sin LLM |
+| se calle mientras habla | «basta rai» u «oye rai» | Pi (spotter) → `stop` |
+| se siente | «rai, sentate» | LLM → `Sit` (si ya está sentado, nada) |
+| se pare | «rai, levantate» / «rai, arriba» | LLM → `Stand` (si ya está parado, nada) |
+| arranque el stack caído | «rai, arriba» | Pi → launcher (sólo si el orquestador no contesta) |
+| parada de emergencia | «emergencia» / «peligro» | LLM server → `estop` (deja al robot sin control) |
+
+- «pará», «stop», «basta» dichos al LLM **no** frenan ni hacen `estop`: el
+  robot contesta «Para frenarme decí "rai, frena"». El server descarta
+  cualquier `estop` sin «emergencia»/«peligro» en el texto
+  (`llm-server-rai-026/app/safety.py`, `ground_estop`).
+- `Sit`/`Stand` no son códigos del firmware: el orquestador
+  (`R-AI-026/orchestrator/posture.py`) manda `StandSitToggle` sólo si hace falta.
+- Ya no existen «para rai» (corte: chocaba con «Parate, RAI»), «rai,
+  levántate» ni «rai, reinicia» (reiniciaban el stack).
 
 ## Wake word: "oye rai"
 

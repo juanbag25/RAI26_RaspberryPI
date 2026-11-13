@@ -39,6 +39,7 @@ from config import (
     FRAME_MS,
     BRAKE_PHRASES,
     LAUNCH_PHRASES,
+    LAUNCH_UP_ORDER,
     LAUNCHER_PORT,
     MIC_MODE,
     MIX_TRIM_ENABLED,
@@ -434,7 +435,8 @@ def transcribe_worker(
             drop("STT", "eco del prompt de Whisper: es ruido, no habló nadie")
             return "eco_prompt"
         if text_wake and launch.matches(text):
-            launch.request(text)
+            # Modo texto: la frase sigue su camino (va al LLM con el resto).
+            launch.request(text, order_on_up=False)
         if wake_prefix:
             text = wake.strip_wake(text)
             if not text:
@@ -928,10 +930,15 @@ def main() -> None:
         # contestar sin decir «oye rai».
         wake.open_window()
 
+    def on_launch_up(heard: str) -> None:
+        # «rai, arriba» con el stack andando = la orden de pararse.
+        if LAUNCH_UP_ORDER and orchestrator.send_transcript(LAUNCH_UP_ORDER, 1.0):
+            wake.await_reply()
+
     launch = LaunchRequest([h.strip() for h in launcher_ip.split(",") if h.strip()],
                            LAUNCHER_PORT, LAUNCH_PHRASES if WAKE_WORD_ENABLED else (),
                            on_starting=wake.sleep, on_ready=on_launch_ready,
-                           is_up=orchestrator.probe)
+                           is_up=orchestrator.probe, on_up=on_launch_up)
     start_in_background(CTRL_PORT, mute, handlers={"ORCH_READY": launch.ready,
                                                    "LAUNCH_FAILED": launch.failed})
     orchestrator.on_reply_expected = mute.expect_reply
@@ -1212,22 +1219,28 @@ def main() -> None:
                         launch.expect()
                     if handle_wake(heard, af.t, announce=False, voice=voice):
                         counters.wakes += 1
-                        # «rai, arriba»: además, que el launcher levante el
-                        # stack si no está (si está, queda como este wake).
+                        wake_utt_open = False
                         if is_launch:
+                            # «rai, arriba»: con el stack caído lo arranca;
+                            # levantado es la orden «arriba» (pararse), que
+                            # manda launch_request. Sin «Sí, dime».
                             launch.request(heard)
+                            vad.discard_open_utterance(reason="era «rai arriba»")
+                            ack_pending_t = None
+                        else:
+                            # No se tira la utterance: si la persona sigue de
+                            # largo ("oye rai, sentate"), la orden ya empezó
+                            # acá y cortarla se comía la primera palabra. Se
+                            # marca y en WAKE_ACK_DECIDE_MS se decide (abajo).
+                            # (Del 23/10 al 13/11 esto quedó por error bajo el
+                            # `elif is_launch` y el «Sí, dime» casi no salía.)
+                            if vad.mark():
+                                ack_pending_t = af.t
+                            else:
+                                ack_pending_t = None
+                                wake.announce()
                     elif is_launch:
                         launch.cancel()
-                        # No se tira la utterance: si la persona sigue de
-                        # largo ("oye rai, sentate"), la orden ya empezó acá y
-                        # cortarla se comía la primera palabra. Se marca y en
-                        # WAKE_ACK_DECIDE_MS se decide (abajo).
-                        wake_utt_open = False
-                        if vad.mark():
-                            ack_pending_t = af.t
-                        else:
-                            ack_pending_t = None
-                            wake.announce()
             opened_before = vad.in_speech
             closed, audio = vad.process_frame(frame, af.rms, af.t)
             if spotter is not None and vad.in_speech and not opened_before:

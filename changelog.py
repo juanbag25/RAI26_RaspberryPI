@@ -12,6 +12,21 @@ log (un descarte nuevo, un evento nuevo, un umbral con otro significado).
 
 CHANGES: list[dict] = [
     {
+        "id": "ack-wake-fix",
+        "date": "2026-11-13",
+        "what": "Arreglado: desde el 23/10 el bloque que decide el «Sí, dime» tras un "
+                "wake del spotter quedó bajo `elif is_launch` y casi no se ejecutaba "
+                "(el 06/11, 12 de 16 wakes sin `awake`; los demás ~1 s tarde, vía "
+                "Whisper). Ahora todo wake del spotter vuelve a pedir el «Sí, dime».",
+    },
+    {
+        "id": "frases-separadas",
+        "date": "2026-11-13",
+        "what": "Sin «para rai/ray» en SPEAK_STOP_PHRASES («Parate, RAI» cortaba al "
+                "robot): cortar = «basta rai» u «oye rai». «rai arriba» con el stack "
+                "andando manda LAUNCH_UP_ORDER («levantate» → LLM Stand) sin «Sí, dime».",
+    },
+    {
         "id": "launch-solo-caido",
         "date": "2026-11-13",
         "what": "«rai arriba» sólo arranca el stack si el orquestador no contesta "

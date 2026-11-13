@@ -349,6 +349,10 @@ WAKE_PHRASES = _env_list("WAKE_PHRASES", ("oye rai", "oye ray", "oye rey",
 # salían de Vosk como «rai levántate» y reiniciaban todo: por eso ya no están
 # «levántate» ni «reinicia». Se pasan a Vosk TAL CUAL. Vacío = desactivado.
 LAUNCH_PHRASES = _env_list("LAUNCH_PHRASES", ("rai arriba", "ray arriba", "rey arriba"))
+# Con el stack andando, «rai, arriba» no es un wake sino una orden: se le manda
+# este texto al orquestador (el LLM lo traduce a `Stand`, pararse). Así
+# «arriba» siempre significa «levantate». Vacío = sólo despierta, sin orden.
+LAUNCH_UP_ORDER = _env_str("LAUNCH_UP_ORDER", "levantate")
 # Orden de freno («rai frena»): la decide el spotter, NO el LLM. Vale siempre
 # (dormido, despierto o mientras el robot habla): manda el evento `brake` al
 # orquestador, que se calla, cancela la misión y frena (mission_node `stop`),
@@ -521,8 +525,9 @@ SPEAKER_FORGET_DAYS = _env_float("SPEAKER_FORGET_DAYS", 30)
 SPEAK_LISTEN_MODE = _env_str("SPEAK_LISTEN_MODE", "mute").lower()
 # Dos palabras como WAKE_PHRASES (una sola, "para", aparece en cualquier frase
 # del propio robot); "rai" suele salir "ray"/"rey" en Vosk, por eso las variantes.
-SPEAK_STOP_PHRASES = _env_list("SPEAK_STOP_PHRASES",
-                               ("para rai", "para ray", "basta rai", "basta ray"))
+# Sin «para rai» desde 2026-11-13: «Parate, RAI» (pararse) salía de Vosk como
+# «para ray» y callaba al robot. Para cortarlo: «basta rai» u «oye rai».
+SPEAK_STOP_PHRASES = _env_list("SPEAK_STOP_PHRASES", ("basta rai", "basta ray"))
 SPEAK_BARGE_RATIO = _env_float("SPEAK_BARGE_RATIO", 2.0)
 # Dónde está el parlante del robot visto desde el array (marco del robot,
 # mismo formato que DOA_BLOCKED_SECTORS). Vacío = no se chequea dirección.
