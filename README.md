@@ -27,6 +27,7 @@ mic → audio_capture / respeaker → vad (+ silero) → wake_spotter / wake_wor
 | `ctrl_server.py`, `launch_request.py` | Mute del mic desde el orquestador; «rai, arriba» / «rai, reinicia» |
 | `battery.py`, `mic_level.py`, `calibrate.py` | Alimentación, nivel del mic y calibración |
 | `log.py`, `log_report.py`, `changelog.py` | Log persistente en `logs/` y su reporte |
+| `rai_perf.py` | Métricas de rendimiento con el formato común de los tres repos (copia de `R-AI-026/observability/rai_perf.py`, no editar acá) |
 | `calibrate_stt.sh`, `dev_orchestrator.sh` | Calibrar con el servicio frenado; apuntar la Pi a otro orquestador |
 | `99-respeaker.rules` | Regla udev para usar el array sin root |
 
@@ -744,6 +745,33 @@ python log_report.py --run last   # sólo desde el último arranque
 Rotación: un archivo por día, se borran los de más de `LOG_KEEP_DAYS` (60) y,
 si el total pasa `LOG_MAX_MB` (500), los más viejos. Con el robot quieto son
 ~7 MB/día. `LOG_DIR` cambia la carpeta; `LOG_PERSIST=0` lo apaga.
+
+### Métricas de rendimiento (`logs/perf-AAAA-MM-DD.jsonl`)
+
+En la misma carpeta, aparte del log de arriba, van las métricas del pipeline
+con el formato común de los tres repos (contrato en
+`R-AI-026/observability/PERF.md`): pocos registros por turno, sin texto, 90
+días (`PERF_KEEP_DAYS`, `PERF_MAX_MB`, `PERF_DIR`; `PERF_ENABLED=0` las apaga).
+
+- `pi.utterance`: cada frase que procesa el worker de STT, desde que el VAD la
+  cerró hasta que se mandó (o se descartó), con cola, STT, huella de voz y envío.
+- `pi.reply`: del envío al `SPEAK_START` del robot = la espera que siente la
+  persona (lo mismo que `reply_s` del evento `speak`).
+- `pi.wake`: cada «oye rai» del spotter, aceptado o con su motivo de rechazo.
+- `config`: al arrancar, backend/modelo de STT, wake, VAD, umbrales de voz y
+  los `id` de `changelog.py`.
+
+Cada frase lleva un `turn` (10 hex, también en el evento `stt`) que viaja en
+el JSON al orquestador (`turn_id`) y de ahí al LLM server: con eso
+`R-AI-026/observability/perf_report.py` une los archivos de los tres equipos.
+Para analizarlo, traer `logs/perf-*.jsonl` de la Pi junto con los de la Jetson
+y el LLM server a una carpeta y correr el reporte ahí.
+
+Tests (sin mic, sin Groq; simulan `webrtcvad`/`groq` si no están):
+
+```bash
+python3 -m unittest discover -s tests
+```
 
 ## Logs y diagnóstico
 

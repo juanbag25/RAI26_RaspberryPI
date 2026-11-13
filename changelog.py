@@ -12,6 +12,14 @@ log (un descarte nuevo, un evento nuevo, un umbral con otro significado).
 
 CHANGES: list[dict] = [
     {
+        "id": "perf-metrics",
+        "date": "2026-11-13",
+        "what": "Métricas de rendimiento comunes a los tres repos: logs/perf-AAAA-MM-DD.jsonl "
+                "(pi.utterance, pi.reply, pi.wake, config; ver "
+                "R-AI-026/observability/PERF.md). Cada frase procesada lleva `turn` (también "
+                "en el evento stt) y el JSON al orquestador manda `turn_id`.",
+    },
+    {
         "id": "ack-wake-fix",
         "date": "2026-11-13",
         "what": "Arreglado: desde el 23/10 el bloque que decide el «Sí, dime» tras un "

@@ -37,6 +37,7 @@ from config import (
     DOA_SPEAKER_SECTOR,
     DOA_TOLERANCE_DEG,
     FRAME_MS,
+    GROQ_MODEL,
     BRAKE_PHRASES,
     LAUNCH_PHRASES,
     LAUNCH_UP_ORDER,
@@ -65,8 +66,9 @@ from ctrl_server import SpeakMute, start_in_background
 from doa import DoaFocus, DoaReading, in_any_sector, parse_sectors, to_robot_frame
 from launch_request import LaunchRequest
 from changelog import CHANGES
-from log import (DEBUG, dbg, dim, drop, err, event, fmt, info, ok, persist,
+from log import (DEBUG, dbg, dim, drop, err, event, fmt, info, ok, perf, persist,
                  previous_run_end, warn)
+import rai_perf
 from mix_trim import MixContext, MixTrimmer, doa_by_segment
 from respeaker import ReSpeaker
 from speaker_id import SpeakerLock, load_embedder, load_memory
@@ -179,13 +181,14 @@ class OrchestratorLink:
         self._lock = threading.Lock()
         self._current = hosts[0]
         self._down_until = 0.0
-        # Se llama con "texto"/"ack" cuando llegó algo que debería hacer
-        # hablar al robot (SpeakMute.expect_reply: latencia en el log).
+        # Se llama con "texto"/"ack" (y el id del turno) cuando llegó algo
+        # que debería hacer hablar al robot (SpeakMute.expect_reply: latencia
+        # en el log y en la métrica pi.reply).
         self.on_reply_expected = None
 
-    def reply_expected(self, kind: str) -> None:
+    def reply_expected(self, kind: str, turn_id: str | None = None) -> None:
         if self.on_reply_expected is not None:
-            self.on_reply_expected(kind)
+            self.on_reply_expected(kind, turn_id)
 
     def describe(self) -> str:
         return ", ".join(f"{h}:{self.port}" for h in self.hosts)
@@ -228,7 +231,8 @@ class OrchestratorLink:
         return False
 
     def send_transcript(self, text: str, stt_confidence: float,
-                        pi_latency_s: float | None = None) -> bool:
+                        pi_latency_s: float | None = None,
+                        turn_id: str | None = None) -> bool:
         """Envuelve una transcripción (texto + confianza del STT) en JSON. Los
         eventos de wake (`ORCH_EVENT_PREFIX`) NO pasan por acá: siguen yendo
         como string plano, que es como el orquestador los distingue de una
@@ -236,12 +240,17 @@ class OrchestratorLink:
 
         `pi_latency_s`: desde que el VAD cerró la frase hasta este envío
         (cola + STT + huella de voz). El orquestador sólo lo loguea, para
-        ver de punta a punta cuánto tarda cada turno."""
-        payload = {"text": text, "stt_confidence": stt_confidence}
+        ver de punta a punta cuánto tarda cada turno.
+
+        `turn_id`: id del turno para las métricas de los tres equipos (lo
+        sigue el orquestador y el LLM server, ver rai_perf.py); si no viene se
+        crea uno."""
+        turn_id = turn_id or rai_perf.new_turn_id()
+        payload = {"text": text, "stt_confidence": stt_confidence, "turn_id": turn_id}
         if pi_latency_s is not None:
             payload["pi_latency_s"] = round(pi_latency_s, 3)
         if self.send(json.dumps(payload)):
-            self.reply_expected("texto")
+            self.reply_expected("texto", turn_id)
             return True
         return False
 
@@ -272,20 +281,6 @@ def _boot_uptime_s() -> float | None:
             return round(float(f.read().split()[0]), 1)
     except (OSError, ValueError, IndexError):
         return None
-
-
-def _git_version() -> str:
-    """Commit de este código (+ "-dirty" si hay cambios sin commitear)."""
-    import subprocess
-    here = os.path.dirname(os.path.abspath(__file__))
-    try:
-        rev = subprocess.run(["git", "-C", here, "rev-parse", "--short", "HEAD"],
-                             capture_output=True, text=True, timeout=3).stdout.strip()
-        dirty = subprocess.run(["git", "-C", here, "status", "--porcelain", "--untracked-files=no"],
-                               capture_output=True, text=True, timeout=3).stdout.strip()
-        return (rev or "?") + ("-dirty" if dirty else "")
-    except (OSError, subprocess.SubprocessError):
-        return "?"
 
 
 class Counters:
@@ -389,7 +384,7 @@ def transcribe_worker(
         text, stt_confidence = transcriber.transcribe(audio)
         elapsed = time.monotonic() - t0
         counters.transcribed += 1
-        rec.update(text=text, stt_s=round(elapsed, 3), conf=stt_confidence,
+        rec.update(text=text, stt_s=round(elapsed, 3), conf=stt_confidence, stt_calls=1,
                    **(getattr(transcriber, "last_metrics", None) or {}))
         if verdict is not None:
             # spk_wait_s: lo que la huella de voz atrasó la frase (corre en
@@ -421,7 +416,7 @@ def transcribe_worker(
             text, stt_confidence = transcriber.transcribe(audio)
             elapsed = time.monotonic() - t0
             counters.transcribed += 1
-            rec.update(text=text, stt_s=round(elapsed, 3), conf=stt_confidence,
+            rec.update(text=text, stt_s=round(elapsed, 3), conf=stt_confidence, stt_calls=2,
                        **(getattr(transcriber, "last_metrics", None) or {}))
         if not text:
             counters.empty += 1
@@ -477,7 +472,11 @@ def transcribe_worker(
         rec["sent_text"] = payload
         pi_latency_s = time.monotonic() - queued_at
         rec["pi_latency_s"] = round(pi_latency_s, 3)
-        if orchestrator.send_transcript(payload, stt_confidence, pi_latency_s):
+        t_send = time.monotonic()
+        sent = orchestrator.send_transcript(payload, stt_confidence, pi_latency_s,
+                                            turn_id=rec["turn"])
+        rec["send_s"] = round(time.monotonic() - t_send, 3)
+        if sent:
             counters.sent += 1
             # No dormirse mientras el robot piensa la respuesta.
             wake.await_reply()
@@ -516,7 +515,8 @@ def transcribe_worker(
             event("stt", outcome="superada", audio_s=round(len(item[0]) / 16000.0, 2),
                   level=round(item[1], 5))
             item = newer
-        rec: dict = {}
+        # `turn`: id del turno (métricas de los tres equipos, rai_perf.py).
+        rec: dict = {"turn": rai_perf.new_turn_id()}
         try:
             outcome = process(item, rec)
         except Exception as exc:  # noqa: BLE001 - que una frase rara no mate el hilo
@@ -524,6 +524,22 @@ def transcribe_worker(
             outcome = "error"
             rec["error"] = f"{type(exc).__name__}: {exc}"
         event("stt", outcome=outcome, **rec)
+        perf_utterance(outcome, rec, queued_at=item[2])
+
+
+def perf_utterance(outcome: str, rec: dict, queued_at: float) -> None:
+    """Métrica `pi.utterance` de una frase que procesó el worker: desde que el
+    VAD la cerró hasta que se mandó (o se descartó), con el desglose. Sin
+    texto: sólo su largo (ver R-AI-026/observability/PERF.md)."""
+    sent_text = rec.get("sent_text")
+    perf("pi.utterance", rai_perf.ms_since(queued_at), rec.get("turn"), outcome=outcome,
+         audio_s=rec.get("audio_s"), queue_ms=rai_perf.to_ms(rec.get("age_s")),
+         stt_ms=rai_perf.to_ms(rec.get("stt_s")), stt_calls=rec.get("stt_calls", 0),
+         spk_ms=rai_perf.to_ms(rec.get("spk_s")), spk_wait_ms=rai_perf.to_ms(rec.get("spk_wait_s")),
+         send_ms=rai_perf.to_ms(rec.get("send_s")), conf=rec.get("conf"),
+         logprob_min=rec.get("logprob_min"), no_speech_max=rec.get("no_speech_max"),
+         segs_drop=rec.get("segs_drop"), awake=rec.get("awake"), wake_prefix=rec.get("wake_prefix"),
+         trimmed="mix" in rec, chars=None if sent_text is None else len(sent_text))
 
 
 # Cada cuánto el emisor de eventos mira si se durmió (eso es tiempo que pasa,
@@ -1011,11 +1027,18 @@ def main() -> None:
         wake.on_announce = events.kick
         events.start()
 
-    event("config", **config_snapshot(), git=_git_version(), host=socket.gethostname(),
+    event("config", **config_snapshot(), git=rai_perf.git_version(__file__), host=socket.gethostname(),
           orchestrator=orchestrator.describe(), launcher=launch.describe(), vad_engine=vad.engine,
           spotter=spotter is not None, speaker=speaker.enabled,
           voices=[v.label for v in speaker.known_voices()], heartbeat_s=HEARTBEAT_S,
           max_queue_age_s=MAX_QUEUE_AGE_S, boot_uptime_s=boot_uptime_s, changes=CHANGES)
+    # Con qué se midió (métricas perf-*: R-AI-026/observability/PERF.md).
+    perf("config", backend=BACKEND, stt_model=GROQ_MODEL if BACKEND == "groq" else None,
+         wake_mode=WAKE_MODE if WAKE_WORD_ENABLED else "off", spotter=spotter is not None,
+         vad_engine=vad.engine, mic_mode=MIC_MODE, speaker=speaker.enabled,
+         spk_sim_new=SPEAKER_MIN_SIMILARITY_NEW, spk_sim_known=SPEAKER_MIN_SIMILARITY_KNOWN,
+         max_queue_age_s=MAX_QUEUE_AGE_S, boot_uptime_s=boot_uptime_s,
+         changes=",".join(c["id"] for c in CHANGES))
 
     if HEARTBEAT_S > 0:
         threading.Thread(
@@ -1050,6 +1073,8 @@ def main() -> None:
                  dir=_deg(reading.direction))
             event("wake", heard=heard, accepted=False, reason="sector_ruido",
                   dir=reading.direction)
+            perf("pi.wake", accepted=False, reason="sector_ruido", was_awake=wake.is_awake(),
+                 level=round(level, 5))
             return False
         if wake.is_awake():
             # Traspaso: otra persona (o la misma) vuelve a llamarlo. Tiene que
@@ -1063,7 +1088,11 @@ def main() -> None:
                      nivel=level, umbral=near, dir=_deg(reading.direction))
                 event("wake", heard=heard, accepted=False, reason="traspaso_lejano",
                       level=round(level, 5), level_src=level_src, near=round(near, 5))
+                perf("pi.wake", accepted=False, reason="traspaso_lejano", was_awake=True,
+                     level=round(level, 5))
                 return False
+        perf("pi.wake", accepted=True, reason=None, was_awake=wake.is_awake(),
+             level=round(level, 5))
         event("wake", heard=heard, accepted=True, was_awake=wake.is_awake(),
               level=round(level, 5), level_src=level_src, near=round(vad.near_threshold(), 5),
               noise=round(vad.noise_floor, 5), in_speech=vad.in_speech,

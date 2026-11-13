@@ -43,6 +43,12 @@ audio. Dos clases de registro:
 Rotación: un archivo por día; al arrancar y al cambiar de día se borran los
 de más de LOG_KEEP_DAYS días (60) y, si el total pasa LOG_MAX_MB (500), los
 más viejos. LOG_PERSIST=0 lo apaga.
+
+Métricas de rendimiento (`perf()`): en la misma carpeta, aparte, van
+`perf-AAAA-MM-DD.jsonl` con el formato común de los tres repos (rai_perf.py,
+contrato en R-AI-026/observability/PERF.md): pocos registros por turno, sin
+texto, 90 días (PERF_KEEP_DAYS / PERF_MAX_MB / PERF_DIR; PERF_ENABLED=0 lo
+apaga). Los activa `persist()` y llevan su mismo `run`.
 """
 
 from __future__ import annotations
@@ -52,6 +58,8 @@ import os
 import sys
 import threading
 import time
+
+import rai_perf
 
 DEBUG = os.getenv("LOG_DEBUG", "").strip().lower() in ("1", "true", "yes", "on")
 
@@ -207,12 +215,13 @@ def _jsonable(value: object) -> object:
 
 
 _sink: _Sink | None = None
+_perf: rai_perf.PerfLog | None = None
 
 
 def persist(directory: str | None = None) -> str | None:
     """Activa el log persistente (ver docstring del módulo). Devuelve la
     carpeta, o None si quedó apagado (LOG_PERSIST=0 o no se pudo crear)."""
-    global _sink
+    global _sink, _perf
     if os.getenv("LOG_PERSIST", "1").strip().lower() in ("0", "false", "no", "off"):
         return None
     root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
@@ -228,6 +237,7 @@ def persist(directory: str | None = None) -> str | None:
     except OSError as exc:
         warn("LOG", f"no pude crear {directory} ({exc}): sin log persistente")
         return None
+    _perf = rai_perf.from_env("stt", _sink.dir, ver=rai_perf.git_version(__file__), run=run)
     return _sink.dir
 
 
@@ -256,6 +266,13 @@ def previous_run_end() -> dict | None:
             if rec.get("run") != _sink.run:
                 return rec
     return None
+
+
+def perf(stage: str, ms: float | None = None, turn: str | None = None, **fields: object) -> None:
+    """Métrica de rendimiento (ver docstring del módulo): sólo al archivo
+    perf-*, nunca a la consola. `ms` en milisegundos."""
+    if _perf is not None:
+        _perf.write(stage, ms, turn, **fields)
 
 
 def event(name: str, /, **fields: object) -> None:
