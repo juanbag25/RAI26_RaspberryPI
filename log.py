@@ -268,6 +268,11 @@ def previous_run_end() -> dict | None:
     return None
 
 
+def run_id() -> str | None:
+    """Id de esta corrida (el `run` de cada registro), o None sin log persistente."""
+    return _sink.run if _sink is not None else None
+
+
 def perf(stage: str, ms: float | None = None, turn: str | None = None, **fields: object) -> None:
     """Métrica de rendimiento (ver docstring del módulo): sólo al archivo
     perf-*, nunca a la consola. `ms` en milisegundos."""

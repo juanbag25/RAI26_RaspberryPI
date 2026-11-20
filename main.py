@@ -65,8 +65,9 @@ from config import (
 from ctrl_server import SpeakMute, start_in_background
 from doa import DoaFocus, DoaReading, in_any_sector, parse_sectors, to_robot_frame
 from launch_request import LaunchRequest
+from recorder import Recorder
 from changelog import CHANGES
-from log import (DEBUG, dbg, dim, drop, err, event, fmt, info, ok, perf, persist,
+from log import (DEBUG, dbg, dim, drop, err, event, fmt, info, ok, perf, persist, run_id,
                  previous_run_end, warn)
 import rai_perf
 from mix_trim import MixContext, MixTrimmer, doa_by_segment
@@ -836,6 +837,30 @@ def heartbeat_worker(
             report_power()
 
 
+def start_recorder(capture: LinuxAudioCapture) -> Recorder | None:
+    """Grabación continua del mic (recorder.py), o None si está apagada, ya
+    llegó al tope acumulado o no se pudo crear la carpeta."""
+    import config
+    if not config.RECORD_AUDIO:
+        dim("REC", "grabación del mic apagada (RECORD_AUDIO=0)")
+        return None
+    multi = config.RECORD_CHANNELS == "all" and capture.is_array
+    if config.RECORD_CHANNELS == "all" and not capture.is_array:
+        warn("REC", "RECORD_CHANNELS=all sin el ReSpeaker: grabo mono")
+    try:
+        rec = Recorder(config.RECORD_DIR, max_bytes=int(config.RECORD_MAX_GB * 1e9),
+                       channels=6 if multi else 1, sample_rate=config.SAMPLE_RATE,
+                       segment_s=config.RECORD_SEGMENT_S, run=run_id(),
+                       min_free_bytes=int(config.RECORD_MIN_FREE_GB * 1e9), frame_ms=FRAME_MS)
+    except OSError as exc:
+        warn("REC", f"no pude crear {config.RECORD_DIR} ({exc}): sin grabación")
+        return None
+    if not rec.start():
+        return None
+    capture.keep_multi = multi
+    return rec
+
+
 def main() -> None:
     # --- CONFIGURACIÓN DE RED ---
     # Lee la(s) IP(s) desde tu archivo .env, o usa una IP fija de respaldo.
@@ -915,6 +940,7 @@ def main() -> None:
         warn("ARRAY", "audio del ReSpeaker pero sin control USB (pyusb/permisos, ver "
              "README): sin DoA ni parámetros DSP, foco sólo por nivel")
     spatial = Spatial(array)
+    recorder = start_recorder(capture)
     # Huella de voz de quien despertó al robot (speaker_id.py).
     embedder = load_embedder()
     speaker = SpeakerLock(embedder, load_memory(embedder))
@@ -1178,6 +1204,9 @@ def main() -> None:
         was_muted = False
         for af in capture.frames():
             frame = af.pcm
+            if recorder is not None:
+                # Todo, también muteado: la hora es la de pared, como el log.
+                recorder.push(af.multi or frame, time.time())
             if first_frame:
                 first_frame = False
                 ok("AUDIO", "primer frame del mic: escuchando")
@@ -1397,6 +1426,8 @@ def main() -> None:
         # Marca de cierre limpio: si falta, el próximo arranque avisa (prev_run).
         event("exit", reason=exit_reason, ran_s=round(time.monotonic() - started, 1),
               totals=dict(vars(counters)))
+        if recorder is not None:
+            recorder.close()
         # Aprende la conversación abierta antes de salir (Ctrl+C, systemd).
         speaker.close()
         if array is not None:

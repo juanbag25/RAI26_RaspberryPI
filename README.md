@@ -780,6 +780,39 @@ Tests (sin mic, sin Groq; simulan `webrtcvad`/`groq` si no están):
 python3 -m unittest discover -s tests
 ```
 
+### Grabación continua del mic (`data/recordings/`, para benchmarks)
+
+`recorder.py` graba **todo** lo que entra por el mic — también mientras el
+robot habla y el STT está muteado — para después probar pipelines nuevos con
+audio real del robot (p. ej. el oído del server, `llm-server-rai-026/ear/`).
+Viene prendido; `RECORD_AUDIO=0` en `.env` lo apaga.
+
+- **Tope duro acumulado**: `RECORD_MAX_GB` (2) entre TODAS las corridas. Si una
+  sesión graba 0.5 GB y otra 1.5 GB, no graba nunca más. El contador está en
+  `data/recordings/budget.json`: borrar los WAV no lo resetea; borrar ese
+  archivo sí (otra tanda de 2 GB). También corta si al disco le quedan menos
+  de `RECORD_MIN_FREE_GB` (2).
+- **Qué graba**: `RECORD_CHANNELS=processed` (default) = el ch0 del ReSpeaker,
+  lo mismo que oye el STT, mono 16 kHz (2 GB ≈ 17 h); `all` = los 6 canales
+  (procesado + 4 mics crudos + referencia; 2 GB ≈ 3 h), para probar
+  beamforming o limpieza de ruido después.
+- **Archivos**: `rec-AAAAMMDD-HHMMSS-<run>.wav` cortados cada
+  `RECORD_SEGMENT_S` (300 s; el WAV queda válido aunque se corte la luz) e
+  `index.jsonl` con `{"file", "sample", "t"}` al abrir cada archivo y cada
+  minuto: `t` es la misma hora de pared que los eventos del log, así que
+  cualquier `utt`, `wake` o `speak` de `stt-*.jsonl` se ubica en el audio
+  (la Pi no tiene RTC: la hora puede estar corrida, pero es la misma en
+  ambos). El `run` del nombre es el del log.
+- Nunca frena el STT: escribe un hilo aparte; si la SD se traba, se pierden
+  frames de la grabación (`dropped` en el evento `rec` y en el índice).
+- Ojo: graba a toda la gente que hable cerca del robot.
+
+Traer la tanda a la PC:
+
+```bash
+rsync -av rai26@<ip-pi>:~/RAI26_RaspberryPI/data/recordings/ ./recordings/
+```
+
 ## Logs y diagnóstico
 
 Cada línea es un evento: hora, **etapa** (siempre del mismo color) y un símbolo

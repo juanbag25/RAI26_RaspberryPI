@@ -12,6 +12,14 @@ log (un descarte nuevo, un evento nuevo, un umbral con otro significado).
 
 CHANGES: list[dict] = [
     {
+        "id": "grabacion-continua",
+        "date": "2026-11-20",
+        "what": "Graba todo lo que entra por el mic (también muteado) en data/recordings/ "
+                "(recorder.py) hasta un tope ACUMULADO de RECORD_MAX_GB (2) entre todas las "
+                "corridas; después no graba más. RECORD_AUDIO=0 lo apaga. Evento nuevo `rec` "
+                "(start, stop, tope).",
+    },
+    {
         "id": "ventana-solo-escuchando",
         "date": "2026-11-20",
         "what": "La ventana de despierto sólo corre con el mic escuchando: se pausa "

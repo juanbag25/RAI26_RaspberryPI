@@ -37,6 +37,9 @@ class AudioFrame:
     pcm: bytes
     rms: float | None
     t: float
+    # Los 6 canales intercalados tal cual del array, sólo si `keep_multi`
+    # (la grabación con RECORD_CHANNELS=all); si no, None.
+    multi: bytes | None = None
 
 
 def find_array_device() -> int | None:
@@ -53,6 +56,7 @@ class LinuxAudioCapture:
         self._device_id = device_id
         self._blocksize = SAMPLE_RATE * FRAME_MS // 1000
         self.is_array = False
+        self.keep_multi = False  # AudioFrame.multi con los 6 canales (recorder.py)
         if RESPEAKER_ENABLED:
             if device_id is None:
                 self._device_id = find_array_device()
@@ -109,6 +113,6 @@ class LinuxAudioCapture:
                     raw = block[:, _ARRAY_RAW].astype(np.float32) / 32768.0
                     rms = float(np.sqrt(np.mean(raw ** 2)))
                     pcm = np.ascontiguousarray(block[:, _ARRAY_PROCESSED]).tobytes()
-                    yield AudioFrame(pcm, rms, now)
+                    yield AudioFrame(pcm, rms, now, bytes(data) if self.keep_multi else None)
             except KeyboardInterrupt:
                 return

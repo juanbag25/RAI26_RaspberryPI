@@ -551,3 +551,17 @@ SPEAKER_MODEL_PATH = os.path.join(_HERE, "models", SPEAKER_MODEL_NAME)
 WAKE_CLIPS_KEEP = int(_env_float("WAKE_CLIPS_KEEP", 300))
 WAKE_CLIPS_MAX_S = _env_float("WAKE_CLIPS_MAX_S", 4.0)
 WAKE_CLIPS_DIR = _env_str("WAKE_CLIPS_DIR", "") or os.path.join(_HERE, "data", "wake_clips")
+
+# Grabación continua del mic para benchmarks (recorder.py): todo lo que entra,
+# también con el robot hablando, en RECORD_DIR (data/ no se versiona). Tope
+# duro ACUMULADO entre todas las corridas: al llegar a RECORD_MAX_GB no graba
+# nunca más (el contador está en RECORD_DIR/budget.json; borrarlo = otra
+# tanda). RECORD_CHANNELS: "processed" = ch0 del ReSpeaker, lo que oye el STT
+# (2 GB ~ 17 h); "all" = los 6 canales, para probar beamforming/limpieza
+# después (2 GB ~ 3 h). Sin array siempre es mono.
+RECORD_AUDIO = _env_bool("RECORD_AUDIO", True)
+RECORD_MAX_GB = _env_float("RECORD_MAX_GB", 2.0)
+RECORD_CHANNELS = _env_str("RECORD_CHANNELS", "processed").lower()
+RECORD_SEGMENT_S = _env_float("RECORD_SEGMENT_S", 300.0)
+RECORD_MIN_FREE_GB = _env_float("RECORD_MIN_FREE_GB", 2.0)
+RECORD_DIR = _env_str("RECORD_DIR", "") or os.path.join(_HERE, "data", "recordings")
