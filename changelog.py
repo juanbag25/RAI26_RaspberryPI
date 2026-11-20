@@ -12,6 +12,16 @@ log (un descarte nuevo, un evento nuevo, un umbral con otro significado).
 
 CHANGES: list[dict] = [
     {
+        "id": "ventana-solo-escuchando",
+        "date": "2026-11-20",
+        "what": "La ventana de despierto sólo corre con el mic escuchando: se pausa "
+                "mientras el robot habla (antes SPEAK_START sólo la estiraba) y con "
+                "BUSY_START/BUSY_END del orquestador mientras hace una acción callada "
+                "(pasos, postura, truco; tope BUSY_TIMEOUT_S). «rai, silencio» (LLM "
+                "`silence`) manda SLEEP: la Pi se duerme ya (evento `silence`, después "
+                "el `asleep` de siempre). Evento nuevo `busy` (start, awake).",
+    },
+    {
         "id": "perf-metrics",
         "date": "2026-11-13",
         "what": "Métricas de rendimiento comunes a los tres repos: logs/perf-AAAA-MM-DD.jsonl "

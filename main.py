@@ -931,8 +931,11 @@ def main() -> None:
     # y acá se descartan los frames, así el robot no se transcribe a sí mismo.
     # El SPEAK_END además renueva la ventana del wake word: el robot acaba de
     # contestar, lo natural es que le sigan hablando sin repetir el nombre.
-    # El SPEAK_START congela la ventana mientras el robot habla.
-    mute = SpeakMute(on_speak_end=wake.refresh, on_speak_start=wake.hold)
+    # El SPEAK_START congela la ventana mientras el robot habla (sólo corre
+    # con el mic escuchando); BUSY_START/BUSY_END hacen lo mismo mientras el
+    # robot hace una acción callada (pasos, postura, truco).
+    mute = SpeakMute(on_speak_end=lambda: wake.resume("speak"),
+                     on_speak_start=lambda: wake.pause("speak"))
     # Arranque por voz («rai, arriba»): el launcher de la Jetson corre
     # start_orchestrator.sh. Mientras arranca, la Pi vuelve a dormirse; al
     # terminar avisa ORCH_READY / LAUNCH_FAILED por el puerto de control.
@@ -955,8 +958,30 @@ def main() -> None:
                            LAUNCHER_PORT, LAUNCH_PHRASES if WAKE_WORD_ENABLED else (),
                            on_starting=wake.sleep, on_ready=on_launch_ready,
                            is_up=orchestrator.probe, on_up=on_launch_up)
+    def on_busy(start: bool) -> None:
+        if start:
+            wake.pause("busy")
+            dim("WAKE", "el robot hace una acción: la ventana no corre"
+                if wake.paused() else "acción del robot (dormido: no despierto)")
+        else:
+            wake.resume("busy")
+            dim("WAKE", "terminó la acción del robot")
+        event("busy", start=start, awake=wake.is_awake())
+
+    def on_silence() -> None:
+        # «rai, silencio» (LLM `silence` -> SLEEP del orquestador): a dormir
+        # ya. El aviso `asleep` (chime) lo manda OrchestratorEvents solo.
+        was_awake = wake.is_awake()
+        wake.sleep()
+        events.kick()
+        info("WAKE", "«silencio»: me duermo hasta el próximo «oye rai»")
+        event("silence", was_awake=was_awake)
+
     start_in_background(CTRL_PORT, mute, handlers={"ORCH_READY": launch.ready,
-                                                   "LAUNCH_FAILED": launch.failed})
+                                                   "LAUNCH_FAILED": launch.failed,
+                                                   "BUSY_START": lambda: on_busy(True),
+                                                   "BUSY_END": lambda: on_busy(False),
+                                                   "SLEEP": on_silence})
     orchestrator.on_reply_expected = mute.expect_reply
     dim("CTRL", f"espero SPEAK_START/SPEAK_END del orquestador en :{CTRL_PORT}")
 

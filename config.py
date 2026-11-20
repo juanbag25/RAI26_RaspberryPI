@@ -144,6 +144,10 @@ MUTE_TIMEOUT_S = 30.0
 # antes de que termine de sonar el parlante de la Jetson (y queda la cola de
 # reverberación). Sin esto se transcribía el final del «Sí, dime» como «Sí.».
 SPEAK_END_TAIL_S = 0.3
+# BUSY_START / BUSY_END del orquestador: el robot está haciendo una acción
+# callada (pasos, una postura, un truco). Mientras tanto la ventana de
+# despierto no corre (igual que mientras habla). Tope por si se pierde el END.
+BUSY_TIMEOUT_S = _env_float("BUSY_TIMEOUT_S", 90.0)
 
 # Qué decide "¿esto es voz humana?" (el filtro de cercanía por nivel va
 # encima en los dos casos):

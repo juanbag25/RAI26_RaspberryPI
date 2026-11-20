@@ -12,10 +12,14 @@ la concatenación de esas palabras, que rescata el "R.A.I." -> "r a i" -> "rai"
 que a veces devuelve Whisper.
 
 Una vez despierto queda una ventana CORTA de WAKE_WINDOW_S segundos para
-seguir la charla sin repetir el nombre. La ventana no corre mientras el robot
-habla (SPEAK_START -> `hold`) y vuelve a empezar cuando termina (SPEAK_END ->
-`refresh`): «Sí, dime» -> la orden enseguida; respuesta -> la réplica
-enseguida. Tras mandar una orden se espera hasta REPLY_WAIT_S a que el robot
+seguir la charla sin repetir el nombre. La ventana sólo corre mientras el mic
+ESCUCHA: no corre mientras el robot habla (SPEAK_START -> `pause("speak")`,
+mic muteado) ni mientras hace una acción callada (BUSY_START del orquestador
+-> `pause("busy")`: pasos, posturas, trucos), y vuelve a empezar entera cuando
+termina (SPEAK_END / BUSY_END -> `resume`): «Sí, dime» -> la orden enseguida;
+respuesta -> la réplica enseguida. Antes (`hold`) el mute sólo estiraba la
+ventana y una acción callada la dejaba vencer a mitad del movimiento.
+`sleep` (también «rai, silencio» -> SLEEP del orquestador) la cierra ya. Tras mandar una orden se espera hasta REPLY_WAIT_S a que el robot
 empiece a contestar (`await_reply`), así la latencia del LLM no lo duerme.
 
 Atención: despertarse no es "escuchar todo lo que pase el VAD durante N
@@ -42,6 +46,7 @@ from log import dim, drop, fmt, ok
 from config import (
     ATTENTION_FOLLOW_ALPHA,
     ATTENTION_LEVEL_RATIO,
+    BUSY_TIMEOUT_S,
     MUTE_TIMEOUT_S,
     REPLY_WAIT_S,
     WAKE_ACK_TEXT,
@@ -80,6 +85,9 @@ class WakeWord:
         self._words = {normalize(w) for w in WAKE_WORDS if normalize(w)}
         self._lock = threading.Lock()
         self._awake_until = 0.0
+        # Pausas de la ventana: motivo ("speak", "busy") -> tope (monotonic).
+        # Con alguna activa está despierto aunque _awake_until haya pasado.
+        self._pauses: dict[str, float] = {}
         # Nivel (p90 RMS) de la voz a la que le estamos prestando atención.
         # 0 = todavía sin referencia (recién despierto): la toma de la primera
         # frase aceptada.
@@ -95,25 +103,63 @@ class WakeWord:
 
     # -- estado ---------------------------------------------------------------
 
+    def _prune(self, now: float) -> None:
+        """Pausas vencidas (se perdió el END): cuentan como terminadas en su
+        tope, y desde ahí corre la ventana entera. Con el lock tomado."""
+        for reason, until in list(self._pauses.items()):
+            if now >= until:
+                del self._pauses[reason]
+                self._awake_until = max(self._awake_until, until + WAKE_WINDOW_S)
+
+    def _awake(self, now: float) -> bool:
+        self._prune(now)
+        return bool(self._pauses) or now < self._awake_until
+
     def is_awake(self) -> bool:
         with self._lock:
-            return time.monotonic() < self._awake_until
+            return self._awake(time.monotonic())
+
+    def paused(self) -> bool:
+        with self._lock:
+            self._prune(time.monotonic())
+            return bool(self._pauses)
 
     def refresh(self) -> None:
         """Renueva la ventana si ya estaba despierto (no lo despierta)."""
         with self._lock:
-            if time.monotonic() < self._awake_until:
-                self._awake_until = time.monotonic() + WAKE_WINDOW_S
+            now = time.monotonic()
+            if self._awake(now) and not self._pauses:
+                self._awake_until = now + WAKE_WINDOW_S
 
-    def hold(self) -> None:
-        """El robot empezó a hablar (SPEAK_START): mientras habla la ventana
-        no corre. Si el SPEAK_END se pierde, el mute expira a MUTE_TIMEOUT_S y
-        llama a refresh(); el margen extra es por si eso tarda."""
+    def pause(self, reason: str, max_s: float | None = None) -> None:
+        """La ventana deja de correr mientras dure `reason`: "speak" (el robot
+        habla, mic muteado) o "busy" (hace una acción). Sólo si está despierto:
+        un robot que habla dormido no despierta al mic. `max_s`: tope por si
+        el fin no llega (SPEAK_END/BUSY_END perdido)."""
+        if max_s is None:
+            max_s = MUTE_TIMEOUT_S + 1.0 if reason == "speak" else BUSY_TIMEOUT_S
         with self._lock:
             now = time.monotonic()
-            if now < self._awake_until:
-                self._awake_until = max(self._awake_until,
-                                        now + MUTE_TIMEOUT_S + WAKE_WINDOW_S)
+            if self._awake(now):
+                self._pauses[reason] = now + max_s
+
+    def resume(self, reason: str) -> None:
+        """Terminó `reason`: si no queda otra pausa, vuelve a correr la
+        ventana ENTERA desde ahora. Sin pausa de ese motivo (un SPEAK_END
+        suelto) es un refresh."""
+        with self._lock:
+            now = time.monotonic()
+            if self._pauses.pop(reason, None) is None:
+                if self._awake(now) and not self._pauses:
+                    self._awake_until = now + WAKE_WINDOW_S
+                return
+            self._prune(now)
+            if not self._pauses:
+                self._awake_until = max(self._awake_until, now + WAKE_WINDOW_S)
+
+    def hold(self) -> None:
+        """Compat: SPEAK_START (= pause("speak"))."""
+        self.pause("speak")
 
     def await_reply(self) -> None:
         """Se le mandó una orden al orquestador: no dormirse mientras el LLM
@@ -124,7 +170,7 @@ class WakeWord:
                 self._awake_until = max(self._awake_until, now + REPLY_WAIT_S)
 
     def window_deadline(self) -> float:
-        """Hasta cuándo dura la ventana ahora (para restore_window)."""
+        """Hasta cuándo dura la ventana ahora, sin contar pausas (para restore_window)."""
         with self._lock:
             return self._awake_until
 
@@ -202,6 +248,7 @@ class WakeWord:
         with self._lock:
             self._awake_until = 0.0
             self._focus_level = 0.0
+            self._pauses.clear()
 
     def focus_level(self) -> float:
         with self._lock:

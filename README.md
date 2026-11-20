@@ -353,6 +353,11 @@ se pierde, el mute expira solo a los `MUTE_TIMEOUT_S` segundos. Después del
 antes de que termine de sonar el parlante y sin ese margen se transcribía la
 cola del «Sí, dime».
 
+Por el mismo puerto llegan también (desde 2026-11-20): `BUSY_START`/`BUSY_END`
+(el robot hace una acción callada —pasos, postura, truco—: la ventana de
+despierto no corre; tope `BUSY_TIMEOUT_S`, 90 s) y `SLEEP` («rai, silencio»,
+LLM `silence`: la Pi se duerme ya y sale el `asleep` de siempre).
+
 Mapa completo de IPs/puertos del sistema: ver `docs/NETWORKING.md` en el repo
 principal (R-AI-026).
 
@@ -683,8 +688,10 @@ NET   ✓ enviado «vení para acá» (0.01s)
   quien lo dijo. Log: `WAKE ✗ DESCARTADO más flojo que quien me llamó`.
 - Uso pensado: «oye rai» → «Sí, dime» → la orden **enseguida**; el robot
   contesta → la réplica **enseguida**. La ventana (`WAKE_WINDOW_S`, 6 s) es
-  corta a propósito y se cuenta desde que el robot **termina** de hablar
-  (`SPEAK_END`); mientras habla no corre (`SPEAK_START`). Si empezás a hablar
+  corta a propósito y **sólo corre mientras el mic escucha**: se congela
+  mientras el robot habla (`SPEAK_START` → `SPEAK_END`) o hace una acción
+  callada (`BUSY_START` → `BUSY_END`) y al terminar vuelve entera. «Rai,
+  silencio» la cierra ya (`SLEEP`). Si empezás a hablar
   dentro de la ventana, no se cierra a mitad de frase. Después de mandar una
   orden espera hasta `REPLY_WAIT_S` (12 s) a que el robot conteste, así la
   latencia del LLM no lo duerme.
